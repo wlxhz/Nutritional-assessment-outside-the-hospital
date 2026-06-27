@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>慢慢养 App Demo</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="phone-frame" aria-label="慢慢养 App 预览">
+        <header class="app-header">
+          <div>
+            <p class="brand-kicker">慢慢养</p>
+            <h1 id="screenTitle">花园</h1>
+          </div>
+          <div class="status-chip" id="loginState">未登录</div>
+        </header>
+
+        <section id="onboarding" class="onboarding active">
+          <div class="soft-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">手机号登录</p>
+                <h2>先建立本地用户</h2>
+              </div>
+              <span class="mini-badge">SQLite</span>
+            </div>
+            <label class="field">
+              <span>手机号</span>
+              <input id="phoneInput" inputmode="tel" placeholder="13800000000" value="13800000000" />
+            </label>
+            <div class="split-actions">
+              <button id="oneTapBtn" class="secondary" type="button">一键授权</button>
+              <button id="sendCodeBtn" class="secondary" type="button">获取验证码</button>
+            </div>
+            <label class="field">
+              <span>验证码</span>
+              <input id="codeInput" inputmode="numeric" placeholder="本地 Demo 会返回验证码" />
+            </label>
+            <button id="loginBtn" class="primary" type="button">验证码登录</button>
+            <p id="authFeedback" class="feedback"></p>
+          </div>
+
+          <div class="soft-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">基础身体指征</p>
+                <h2>生成营养方案</h2>
+              </div>
+              <span class="mini-badge">三餐</span>
+            </div>
+            <div class="form-grid">
+              <label class="field">
+                <span>病症</span>
+                <select id="diseaseType">
+                  <option value="diabetes">糖尿病</option>
+                  <option value="hypertension">高血压</option>
+                  <option value="internal_postoperative_recovery">内科术后康复</option>
+                  <option value="tumor_recovery">肿瘤康复</option>
+                  <option value="other">其他</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>其他病症</span>
+                <input id="diseaseOtherText" placeholder="选择其他时填写" />
+              </label>
+              <label class="field">
+                <span>体重 kg</span>
+                <input id="weight" type="number" value="65" />
+              </label>
+              <label class="field">
+                <span>身高 cm</span>
+                <input id="height" type="number" value="168" />
+              </label>
+              <label class="field">
+                <span>年龄</span>
+                <input id="age" type="number" value="68" />
+              </label>
+              <label class="field">
+                <span>性别</span>
+                <select id="gender">
+                  <option value="female">女</option>
+                  <option value="male">男</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>工作强度</span>
+                <select id="workIntensity">
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>紧急联系人手机号</span>
+                <input id="emergencyPhone" inputmode="tel" value="13900000000" />
+              </label>
+            </div>
+            <label class="field">
+              <span>过敏史</span>
+              <input id="allergyHistory" value="无明确过敏史" />
+            </label>
+            <label class="field">
+              <span>疾病史</span>
+              <input id="diseaseHistory" value="长期慢病管理需求" />
+            </label>
+            <button id="saveProfileBtn" class="primary" type="button">保存并生成方案</button>
+            <p id="profileFeedback" class="feedback"></p>
+          </div>
+        </section>
+
+        <section id="gardenScreen" class="screen">
+          <div class="garden-hero">
+            <div>
+              <p class="eyebrow">爱人如养花</p>
+              <h2>连续 7 天，养成一朵大花</h2>
+            </div>
+            <div class="big-flower" id="bigFlower">花</div>
+          </div>
+          <div class="week-grid" id="gardenDays"></div>
+          <div class="soft-panel">
+            <h3>今日完成条件</h3>
+            <ul class="check-list">
+              <li>摄入量达标</li>
+              <li>记录完整</li>
+              <li>无红色风险食物</li>
+            </ul>
+          </div>
+        </section>
+
+        <section id="infoScreen" class="screen">
+          <div class="sticker-strip">
+            <div class="sticker compliant">燕麦粥</div>
+            <div class="sticker generally">杂粮饭</div>
+            <div class="sticker risk">高糖点心</div>
+          </div>
+          <div class="legend-row">
+            <span><b class="dot compliant"></b>符合</span>
+            <span><b class="dot generally"></b>一般符合</span>
+            <span><b class="dot risk"></b>非常不符合</span>
+          </div>
+
+          <div class="soft-panel vision-slot">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">视觉识别预留位</p>
+                <h2>等待算法接口接入</h2>
+              </div>
+              <span class="mini-badge">Reserved</span>
+            </div>
+            <p>这里保留摄像头识别、食物贴纸生成、克数估算和特医/特膳识别的位置。</p>
+            <button id="visionContractBtn" class="secondary" type="button">查看接口契约</button>
+            <pre id="visionContract" class="contract-box"></pre>
+          </div>
+
+          <div class="soft-panel">
+            <div class="section-head">
+              <h2>营养方案</h2>
+              <span id="aiStatus" class="mini-badge">未生成</span>
+            </div>
+            <div id="planSummary" class="plan-summary"></div>
+          </div>
+
+          <div class="meal-tabs" id="mealTabs"></div>
+          <div class="soft-panel">
+            <div class="section-head">
+              <h2>红色风险弹窗 Demo</h2>
+              <span class="mini-badge risk-text">短信确认</span>
+            </div>
+            <p>识别到红色风险食物时，提供替代食物、原因说明、继续进食确认和短信通知入口。</p>
+            <button id="riskBtn" class="danger" type="button">模拟红色风险食物</button>
+            <div id="riskAlert" class="risk-alert hidden">
+              <strong>风险原因</strong>
+              <p>当前食物与营养方案不匹配，建议替换为低糖、高纤维选择。</p>
+              <button id="smsBtn" class="secondary" type="button">通知紧急联系人</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="recordScreen" class="screen">
+          <div class="segmented" id="rangeTabs">
+            <button class="active" data-range="day" type="button">日</button>
+            <button data-range="week" type="button">周</button>
+            <button data-range="month" type="button">月</button>
+          </div>
+          <div class="chart-grid">
+            <div class="soft-panel">
+              <h3>占比</h3>
+              <div id="pieChart" class="pie-chart"></div>
+            </div>
+            <div class="soft-panel">
+              <h3>对比</h3>
+              <div id="barChart" class="bar-chart"></div>
+            </div>
+          </div>
+          <div class="soft-panel agent-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Agent</p>
+                <h2>食谱反馈与院外陪伴</h2>
+              </div>
+              <span class="mini-badge">AI</span>
+            </div>
+            <div id="agentMessages" class="messages"></div>
+            <div class="agent-input">
+              <input id="agentInput" placeholder="今天吃得怎么样？身体感觉怎么样？" />
+              <button id="agentSendBtn" class="primary" type="button">发送</button>
+            </div>
+          </div>
+        </section>
+
+        <nav class="tabbar">
+          <button data-screen="gardenScreen" class="active" type="button">花园</button>
+          <button data-screen="infoScreen" type="button">信息</button>
+          <button data-screen="recordScreen" type="button">记录</button>
+        </nav>
+      </section>
+
+      <aside class="dev-panel">
+        <h2>本地后端状态</h2>
+        <p>FastAPI + SQLite + 本地解析服务。视觉算法位置保留，不在此页面实现。</p>
+        <dl id="devState"></dl>
+        <a href="/vision-dashboard">打开视觉算法 Dashboard</a>
+      </aside>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

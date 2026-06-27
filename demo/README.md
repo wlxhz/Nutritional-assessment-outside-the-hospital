@@ -1,9 +1,16 @@
-# 基于长时间视频的食物克重识别与实时营养反馈系统 Demo
+# 慢慢养 App + 视觉识别预留 Demo
 
-这是按 `outputs/基于长时间视频的食物克重识别与实时营养反馈系统技术文档.md` 重建的第一版全栈 demo。
+这是慢慢养 Demo 的本地前后端工程。当前包含两部分：
+
+- 慢慢养 App 业务层：手机号登录、本地 SQLite、营养方案、花园、信息、记录、Agent、短信确认和视觉接口预留位。
+- 视觉识别链路验证：原有长时间视频食物克重识别 Dashboard，保留给算法侧继续接入。
 
 ## 已开发内容
 
+- 慢慢养 App 页面：简约白色、米色基调，三页导航“花园 / 信息 / 记录”。
+- 慢慢养业务 API：手机号验证码、一键授权占位、基础身体指征、AI 营养方案、本地文件解析、摄入记录、报告、Agent、短信确认。
+- 本地 SQLite：用户、身体指征、处方解析、营养方案、摄入记录、报告、Agent 消息和临时识别数据。
+- 视觉识别预留：`GET /api/mmy/vision/contract` 定义前端依赖字段，页面已保留视觉识别位置。
 - FastAPI 后端：会话、token、二维码、手机加入、采集事件、JPEG 帧上传、实时状态、最终报告。
 - WebSocket：Dashboard 订阅 `/ws/sessions/{session_id}/events`，实时接收分析结果。
 - Android 手机采集页：`getUserMedia` 摄像头授权，Canvas 抽帧，JPEG 上传。
@@ -65,6 +72,31 @@ python run_dual.py
 http://127.0.0.1:8000
 ```
 
+当前根路径打开慢慢养 App 页面：
+
+```text
+http://127.0.0.1:8000
+```
+
+视觉识别 Dashboard 打开：
+
+```text
+http://127.0.0.1:8000/vision-dashboard
+```
+
+如果 8000 端口已有旧服务占用，可使用备用端口：
+
+```powershell
+cd F:\泉客松\wo-xi\demo
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8010
+```
+
+然后打开：
+
+```text
+http://127.0.0.1:8010
+```
+
 手机和电脑连接同一 Wi-Fi，使用脚本输出的局域网地址，例如：
 
 ```text
@@ -87,6 +119,28 @@ https://192.168.x.x:8443
 8. 点击“生成报告”输出最终 JSON 报告。
 
 ## API 摘要
+
+慢慢养业务 API：
+
+- `GET /api/mmy/config`
+- `POST /api/mmy/auth/sms-code/send`
+- `POST /api/mmy/auth/sms-code/login`
+- `POST /api/mmy/auth/phone-one-tap`
+- `POST /api/mmy/user/profile`
+- `POST /api/mmy/prescriptions/upload`
+- `DELETE /api/mmy/prescriptions/{prescription_id}`
+- `POST /api/mmy/nutrition-plans/generate`
+- `POST /api/mmy/nutrition-plans/from-prescription`
+- `GET /api/mmy/vision/contract`
+- `POST /api/mmy/intake-records`
+- `GET /api/mmy/reports/nutrients`
+- `POST /api/mmy/reports/{report_id}/confirm`
+- `GET /api/mmy/garden/progress`
+- `GET /api/mmy/agent/prompts`
+- `POST /api/mmy/agent/messages`
+- `POST /api/mmy/sms/confirm`
+
+视觉识别 API：
 
 - `POST /api/sessions`
 - `GET /api/sessions/{session_id}/qrcode`

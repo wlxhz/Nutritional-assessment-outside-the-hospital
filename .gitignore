@@ -10,6 +10,9 @@ demo/models/*.onnx
 demo/models/*.engine
 demo/models/*.torchscript
 demo/models/*.bin
+demo/data/
+demo/static/*smoke*.png
+demo/static/debug-page.png
 
 .env
 .venv/
@@ -18,5 +21,6 @@ env/
 
 *.log
 *.tmp
+慢慢养(1).docx
 Thumbs.db
 .DS_Store

@@ -4,24 +4,33 @@ from io import BytesIO
 import os
 from pathlib import Path
 import socket
+from typing import Any
 
 import qrcode
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.models.schemas import CaptureEvent, FrameUpload, JoinSessionRequest
 from backend.services.analyzer import FoodAnalyzer
+from backend.services.mmy_ai import AiConfig, MmyAiClient, load_env_file
+from backend.services.mmy_parser import LocalPrescriptionParser
+from backend.services.mmy_store import MmyStore, default_db_path
 from backend.services.nutrition import FOOD_PROFILES, all_profiles
 from backend.services.session_store import SessionStore
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = BASE_DIR / "static"
+PROJECT_DIR = BASE_DIR.parent
+load_env_file(PROJECT_DIR / ".env")
 
 analyzer = FoodAnalyzer()
 store = SessionStore(analyzer)
+mmy_store = MmyStore(default_db_path(BASE_DIR))
+mmy_ai = MmyAiClient(AiConfig.from_env())
+mmy_parser = LocalPrescriptionParser()
 
 app = FastAPI(title="Realtime Food Weight Demo", version="0.1.0")
 app.add_middleware(
@@ -99,8 +108,102 @@ def public_base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
+def _sum_nutrients(items: list[dict[str, Any]]) -> dict[str, float]:
+    total = {
+        "energyKcal": 0.0,
+        "proteinG": 0.0,
+        "fatG": 0.0,
+        "carbohydrateG": 0.0,
+        "dietaryFiber": 0.0,
+        "calcium": 0.0,
+        "magnesium": 0.0,
+    }
+    for item in items:
+        nutrients = item.get("nutrients") or {}
+        grams = float(item.get("grams") or 0)
+        # If only grams are supplied by the future vision interface, keep the
+        # item visible and let nutrition-rule APIs fill exact values later.
+        if not nutrients and grams:
+            nutrients = {
+                "energyKcal": grams * 1.2,
+                "proteinG": grams * 0.04,
+                "fatG": grams * 0.02,
+                "carbohydrateG": grams * 0.16,
+            }
+        for key in total:
+            total[key] += float(nutrients.get(key) or 0)
+    return {key: round(value, 1) for key, value in total.items()}
+
+
+def _has_red_item(items: list[dict[str, Any]]) -> bool:
+    return any(item.get("complianceLevel") == "non_compliant" for item in items)
+
+
+def _adjustment_for_items(items: list[dict[str, Any]]) -> dict[str, Any]:
+    if _has_red_item(items):
+        return {
+            "riskLevel": "red",
+            "reason": "包含红色风险食物。",
+            "nextMeal": "下一餐将减少同类高风险食物，并提高蔬菜和优质蛋白比例。",
+            "remainingDaily": "已调整当天剩余可补充量。",
+            "remainingCycle": "已调整当前 7 天周期剩余可补充量。",
+        }
+    return {
+        "riskLevel": "normal",
+        "reason": "当前记录未触发红色风险食物。",
+        "nextMeal": "维持当前每餐建议。",
+        "remainingDaily": "当天剩余可补充量保持不变。",
+        "remainingCycle": "周期剩余可补充量保持不变。",
+    }
+
+
+def _report_data(range_type: str, intakes: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = _sum_nutrients([
+        {"nutrients": record.get("nutrientActual", {})}
+        for record in intakes
+    ])
+    pie_keys = ["energyKcal", "proteinG", "fatG", "carbohydrateG"]
+    pie_total = sum(max(totals.get(key, 0), 0) for key in pie_keys) or 1
+    labels = {
+        "energyKcal": ("能量", "kcal", 1600),
+        "proteinG": ("蛋白质", "g", 65),
+        "fatG": ("脂肪", "g", 45),
+        "carbohydrateG": ("碳水", "g", 210),
+    }
+    pie = [
+        {
+            "label": labels[key][0],
+            "value": totals.get(key, 0),
+            "unit": labels[key][1],
+            "percent": round((totals.get(key, 0) / pie_total) * 100, 1),
+        }
+        for key in pie_keys
+    ]
+    bar = [
+        {
+            "label": labels[key][0],
+            "targetValue": labels[key][2],
+            "actualValue": totals.get(key, 0),
+            "unit": labels[key][1],
+        }
+        for key in pie_keys
+    ]
+    return {
+        "rangeType": range_type,
+        "nutrientSummary": totals,
+        "pieChartData": pie,
+        "barChartData": bar,
+        "source": "local_sqlite",
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard() -> FileResponse:
+    return FileResponse(STATIC_DIR / "app.html")
+
+
+@app.get("/vision-dashboard", response_class=HTMLResponse)
+async def vision_dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "dashboard.html")
 
 
@@ -112,6 +215,266 @@ async def capture() -> FileResponse:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"ok": "true", "analyzer": analyzer.backend_name, "model": analyzer.model_name}
+
+
+@app.get("/api/mmy/config")
+async def mmy_config() -> dict[str, Any]:
+    return {
+        "app": "慢慢养",
+        "runtime": "local",
+        "storage": "sqlite",
+        "aiConfigured": mmy_ai.config.configured,
+        "vision": {
+            "status": "reserved",
+            "message": "视觉识别接口与页面位置已预留，由算法开发文档接入。",
+        },
+        "mealTypes": ["breakfast", "lunch", "dinner"],
+        "colors": {
+            "compliant": "#9DCF55",
+            "generally_compliant": "#EFD67C",
+            "non_compliant": "#C82727",
+        },
+    }
+
+
+@app.post("/api/mmy/auth/sms-code/send")
+async def mmy_send_sms_code(payload: dict[str, str]) -> dict[str, Any]:
+    phone = (payload.get("phone") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=422, detail="phone is required")
+    code_info = mmy_store.issue_code(phone)
+    return {
+        "ok": True,
+        "phone": phone,
+        "expiresInSeconds": 60,
+        "demoCode": code_info["code"],
+        "feedback": "验证码已生成。Demo 本地阶段返回 demoCode，后续接入真实验证码发送服务。",
+    }
+
+
+@app.post("/api/mmy/auth/sms-code/login")
+async def mmy_sms_login(payload: dict[str, str]) -> dict[str, Any]:
+    phone = (payload.get("phone") or "").strip()
+    code = (payload.get("code") or "").strip()
+    if not phone or not code:
+        raise HTTPException(status_code=422, detail="phone and code are required")
+    if not mmy_store.verify_code(phone, code):
+        raise HTTPException(status_code=403, detail="验证码无效或已过期")
+    user = mmy_store.login(phone, "sms_code")
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/mmy/auth/phone-one-tap")
+async def mmy_one_tap(payload: dict[str, str]) -> dict[str, Any]:
+    phone = (payload.get("phone") or "").strip()
+    carrier = (payload.get("carrier") or "三大运营商").strip()
+    if not phone:
+        raise HTTPException(status_code=422, detail="phone is required")
+    user = mmy_store.login(phone, "one_tap")
+    return {
+        "ok": True,
+        "user": user,
+        "carrier": carrier,
+        "feedback": "一键授权页面流程已打通，后续接入支持三大运营商的 SDK。",
+    }
+
+
+@app.post("/api/mmy/user/profile")
+async def mmy_save_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    user_id = (payload.get("userId") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=422, detail="userId is required")
+    profile = mmy_store.save_profile(user_id, payload)
+    return {"ok": True, "profile": profile}
+
+
+@app.get("/api/mmy/user/{user_id}/profile")
+async def mmy_get_profile(user_id: str) -> dict[str, Any]:
+    profile = mmy_store.get_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="profile not found")
+    return {"profile": profile}
+
+
+@app.post("/api/mmy/prescriptions/upload")
+async def mmy_upload_prescription(userId: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
+    data = await file.read()
+    result = mmy_parser.parse(file.filename or "prescription", file.content_type or "", data)
+    record = mmy_store.save_prescription(
+        userId,
+        file.filename or "prescription",
+        file.content_type or "",
+        result.status,
+        result.text,
+        result.preview,
+        result.feedback,
+    )
+    return {
+        "ok": result.status == "parsed",
+        "prescription": record,
+        "status": result.status,
+        "feedback": result.feedback,
+    }
+
+
+@app.delete("/api/mmy/prescriptions/{prescription_id}")
+async def mmy_delete_prescription(prescription_id: str) -> dict[str, Any]:
+    deleted = mmy_store.delete_prescription(prescription_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="prescription not found")
+    return {"ok": True, "deleted": True}
+
+
+@app.post("/api/mmy/nutrition-plans/generate")
+async def mmy_generate_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    user_id = (payload.get("userId") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=422, detail="userId is required")
+    profile = mmy_store.get_profile(user_id) or payload.get("profile") or {}
+    ai_result = mmy_ai.nutrition_plan(profile)
+    record = mmy_store.save_plan(user_id, "ai_generated", ai_result["plan"], ai_result["status"])
+    return {"ok": True, "plan": record}
+
+
+@app.post("/api/mmy/nutrition-plans/from-prescription")
+async def mmy_plan_from_prescription(payload: dict[str, Any]) -> dict[str, Any]:
+    user_id = (payload.get("userId") or "").strip()
+    prescription_id = (payload.get("prescriptionId") or "").strip()
+    if not user_id or not prescription_id:
+        raise HTTPException(status_code=422, detail="userId and prescriptionId are required")
+    prescription = mmy_store.get_prescription(prescription_id)
+    if not prescription:
+        raise HTTPException(status_code=404, detail="prescription not found")
+    profile = mmy_store.get_profile(user_id) or {}
+    ai_result = mmy_ai.nutrition_plan(profile, prescription.get("text") or "")
+    record = mmy_store.save_plan(
+        user_id,
+        "hospital_prescription",
+        ai_result["plan"],
+        ai_result["status"],
+        prescription_id,
+    )
+    return {"ok": True, "plan": record}
+
+
+@app.get("/api/mmy/users/{user_id}/nutrition-plan")
+async def mmy_latest_plan(user_id: str) -> dict[str, Any]:
+    plan = mmy_store.latest_plan(user_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="plan not found")
+    return {"plan": plan}
+
+
+@app.get("/api/mmy/vision/contract")
+async def mmy_vision_contract() -> dict[str, Any]:
+    return {
+        "status": "reserved",
+        "message": "视觉识别由算法侧接入；本接口仅定义前端和业务层依赖字段。",
+        "expectedResult": {
+            "itemName": "品类名称",
+            "itemType": "food | medical_food | special_diet",
+            "grams": "number",
+            "intakeTime": "ISO datetime",
+            "nutrientPayload": "用于计算营养摄入的数据",
+            "compliancePayload": "用于判断贴纸颜色的数据",
+        },
+        "stickerColors": {
+            "compliant": "#9DCF55",
+            "generally_compliant": "#EFD67C",
+            "non_compliant": "#C82727",
+        },
+    }
+
+
+@app.post("/api/mmy/intake-records")
+async def mmy_create_intake(payload: dict[str, Any]) -> dict[str, Any]:
+    user_id = (payload.get("userId") or "").strip()
+    meal_type = payload.get("mealType")
+    if meal_type not in {"breakfast", "lunch", "dinner"}:
+        raise HTTPException(status_code=422, detail="mealType must be breakfast, lunch, or dinner")
+    items = payload.get("items") or []
+    nutrient_actual = payload.get("nutrientActual") or _sum_nutrients(items)
+    adjustment = payload.get("adjustment") or _adjustment_for_items(items)
+    record = mmy_store.save_intake(user_id, meal_type, items, nutrient_actual, adjustment)
+    return {"ok": True, "record": record}
+
+
+@app.get("/api/mmy/reports/nutrients")
+async def mmy_reports(userId: str, rangeType: str = "day") -> dict[str, Any]:
+    intakes = mmy_store.list_intakes(userId)
+    data = _report_data(rangeType, intakes)
+    report = mmy_store.save_report(userId, rangeType, data)
+    return {"ok": True, "report": report, "data": data}
+
+
+@app.post("/api/mmy/reports/{report_id}/confirm")
+async def mmy_confirm_report(report_id: str) -> dict[str, Any]:
+    result = mmy_store.confirm_report(report_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="report not found")
+    return {"ok": True, **result}
+
+
+@app.post("/api/mmy/temp-data/cleanup")
+async def mmy_cleanup_temp_data() -> dict[str, Any]:
+    return {"ok": True, "deletedCount": mmy_store.cleanup_expired_temp_data()}
+
+
+@app.get("/api/mmy/garden/progress")
+async def mmy_garden(userId: str) -> dict[str, Any]:
+    intakes = mmy_store.list_intakes(userId)
+    completed_today = bool(intakes) and not any(_has_red_item(record.get("items", [])) for record in intakes[:3])
+    days = []
+    for index in range(1, 8):
+        earned = completed_today if index == 1 else False
+        days.append({"dayIndex": index, "smallFlowerEarned": earned, "status": "done" if earned else "waiting"})
+    return {
+        "cycleLength": 7,
+        "days": days,
+        "bigFlowerEarned": all(day["smallFlowerEarned"] for day in days),
+        "criteria": ["摄入量达标", "记录完整", "无红色风险食物"],
+    }
+
+
+@app.get("/api/mmy/agent/prompts")
+async def mmy_agent_prompts(userId: str) -> dict[str, Any]:
+    prompts = [
+        {"messageType": "recipe_feedback", "content": "今天的食谱吃起来怎么样？"},
+        {"messageType": "body_feeling", "content": "吃完后身体感觉怎么样？"},
+    ]
+    return {"prompts": prompts}
+
+
+@app.post("/api/mmy/agent/messages")
+async def mmy_agent_message(payload: dict[str, Any]) -> dict[str, Any]:
+    user_id = (payload.get("userId") or "").strip()
+    content = (payload.get("content") or "").strip()
+    message_type = payload.get("messageType") or "companionship"
+    if not user_id or not content:
+        raise HTTPException(status_code=422, detail="userId and content are required")
+    user_message = mmy_store.add_message(user_id, "user", message_type, content)
+    context = {"latestPlan": mmy_store.latest_plan(user_id), "recentIntakes": mmy_store.list_intakes(user_id)[:3]}
+    ai = mmy_ai.agent_reply(content, context)
+    agent_message = mmy_store.add_message(user_id, "agent", message_type, ai["content"])
+    return {"ok": True, "messages": [user_message, agent_message], "aiStatus": ai["status"]}
+
+
+@app.get("/api/mmy/agent/messages")
+async def mmy_agent_messages(userId: str) -> dict[str, Any]:
+    return {"messages": mmy_store.list_messages(userId)}
+
+
+@app.post("/api/mmy/sms/confirm")
+async def mmy_sms_confirm(payload: dict[str, Any]) -> dict[str, Any]:
+    contact = payload.get("contact") or {}
+    message = payload.get("message") or "检测到红色风险食物，请关注慢慢养 App 提示。"
+    phone = contact.get("phone", "")
+    return {
+        "ok": True,
+        "status": "ready_to_open_system_sms",
+        "smsUrl": f"sms:{phone}?body={message}",
+        "feedback": "请在系统短信界面中由用户手动确认发送，App 不会自动发送短信。",
+    }
 
 
 @app.get("/api/network-info")
