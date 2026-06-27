@@ -356,13 +356,14 @@ def _report_data(range_type: str, intakes: list[dict[str, Any]]) -> dict[str, An
         {"nutrients": record.get("nutrientActual", {})}
         for record in intakes
     ])
-    pie_keys = ["energyKcal", "proteinG", "fatG", "carbohydrateG"]
+    pie_keys = ["proteinG", "fatG", "carbohydrateG", "dietaryFiber"]
     pie_total = sum(max(totals.get(key, 0), 0) for key in pie_keys) or 1
     labels = {
         "energyKcal": ("能量", "kcal", 1600),
         "proteinG": ("蛋白质", "g", 65),
         "fatG": ("脂肪", "g", 45),
         "carbohydrateG": ("碳水", "g", 210),
+        "dietaryFiber": ("膳食纤维", "g", 25),
     }
     pie = [
         {
@@ -444,42 +445,6 @@ async def mmy_ai_status(probe: bool = False) -> dict[str, Any]:
     }
 
 
-@app.post("/api/mmy/auth/sms-code/send")
-async def mmy_send_sms_code(payload: dict[str, str]) -> dict[str, Any]:
-    phone = (payload.get("phone") or "").strip()
-    carrier = (payload.get("carrier") or "auto").strip()
-    if not phone:
-        raise HTTPException(status_code=422, detail="phone is required")
-    code_info = mmy_store.issue_code(phone)
-    gateway = {
-        "provider": "carrier_sms_gateway",
-        "carrier": carrier,
-        "requestId": f"sms_{code_info['code']}_{phone[-4:]}",
-        "ttlSeconds": 60,
-        "mock": True,
-    }
-    return {
-        "ok": True,
-        "phone": phone,
-        "expiresInSeconds": 60,
-        "demoCode": code_info["code"],
-        "gateway": gateway,
-        "feedback": "已通过运营商短信网关创建验证码请求。Demo 阶段返回 demoCode，正式环境由网关下发短信。",
-    }
-
-
-@app.post("/api/mmy/auth/sms-code/login")
-async def mmy_sms_login(payload: dict[str, str]) -> dict[str, Any]:
-    phone = (payload.get("phone") or "").strip()
-    code = (payload.get("code") or "").strip()
-    if not phone or not code:
-        raise HTTPException(status_code=422, detail="phone and code are required")
-    if not mmy_store.verify_code(phone, code):
-        raise HTTPException(status_code=403, detail="验证码无效或已过期")
-    user = mmy_store.login(phone, "sms_code")
-    return {"ok": True, "user": user}
-
-
 @app.post("/api/mmy/auth/phone-one-tap")
 async def mmy_one_tap(payload: dict[str, str]) -> dict[str, Any]:
     phone = (payload.get("phone") or "").strip()
@@ -507,15 +472,13 @@ async def mmy_operator_capabilities() -> dict[str, Any]:
         "ok": True,
         "mode": "mock_gateway",
         "carriers": [
-            {"id": "auto", "name": "自动识别", "supports": ["one_tap", "sms_code"]},
-            {"id": "cmcc", "name": "中国移动", "supports": ["one_tap", "sms_code"]},
-            {"id": "cucc", "name": "中国联通", "supports": ["one_tap", "sms_code"]},
-            {"id": "ctcc", "name": "中国电信", "supports": ["one_tap", "sms_code"]},
+            {"id": "auto", "name": "自动识别", "supports": ["one_tap"]},
+            {"id": "cmcc", "name": "中国移动", "supports": ["one_tap"]},
+            {"id": "cucc", "name": "中国联通", "supports": ["one_tap"]},
+            {"id": "ctcc", "name": "中国电信", "supports": ["one_tap"]},
         ],
         "contract": {
             "oneTap": "POST /api/mmy/auth/phone-one-tap",
-            "smsSend": "POST /api/mmy/auth/sms-code/send",
-            "smsLogin": "POST /api/mmy/auth/sms-code/login",
             "tokenPlacement": "正式环境由服务端换取运营商 access token，App 不保存运营商密钥。",
         },
     }

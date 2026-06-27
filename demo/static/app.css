@@ -1086,11 +1086,16 @@ h3 {
 }
 
 .pie-chart::after {
-  content: "";
+  content: "构成";
   position: absolute;
   inset: 42px;
   border-radius: 50%;
   background: var(--paper);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
 }
 
 .bar-chart {
@@ -1119,6 +1124,14 @@ h3 {
   height: 100%;
   width: 40%;
   background: var(--leaf);
+}
+
+.bar-row.over-target .bar-fill {
+  background: var(--red);
+}
+
+.bar-row.over-target > span:last-child {
+  color: var(--red);
 }
 
 .messages {

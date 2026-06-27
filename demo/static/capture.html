@@ -42,6 +42,24 @@
             <textarea id="mobileHint" readonly>请先连接会话。</textarea>
           </label>
         </section>
+
+        <section class="mobile-analysis">
+          <div class="mobile-analysis-head">
+            <div>
+              <p class="eyebrow">Recognition</p>
+              <h2>识别结果</h2>
+            </div>
+            <span id="mobileFrameMeta">0 帧</span>
+          </div>
+          <div class="mobile-metrics">
+            <div><span>总重量</span><strong id="mobileTotalWeight">0g</strong></div>
+            <div><span>热量</span><strong id="mobileTotalCalories">0kcal</strong></div>
+            <div><span>质量</span><strong id="mobileQuality">0%</strong></div>
+          </div>
+          <div id="mobileFoods" class="mobile-foods">
+            <span>连接并开始推流后，这里会显示识别出的食物。</span>
+          </div>
+        </section>
       </section>
     </main>
     <script src="/static/capture.js"></script>

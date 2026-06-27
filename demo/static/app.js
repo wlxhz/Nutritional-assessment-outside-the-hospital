@@ -198,11 +198,11 @@ function logout() {
 
 function renderDevState(config = {}) {
   $("devState").innerHTML = `
-    <dt>运行方式</dt><dd>${config.runtime || "local"}</dd>
-    <dt>本地存储</dt><dd>${config.storage || "sqlite"}</dd>
-    <dt>AI 模型</dt><dd>${config.aiConfigured ? `${config.ai?.defaultModel || "已配置"} 已配置` : "未配置，使用本地规则"}</dd>
+    <dt>运行方式</dt><dd>${config.runtime === "production" ? "服务器部署" : "本地调试"}</dd>
+    <dt>数据存储</dt><dd>${config.storage || "sqlite"}</dd>
+    <dt>AI 模型</dt><dd>${config.aiConfigured ? `${config.ai?.defaultModel || "已配置"} 已接入` : "未配置，使用本地规则"}</dd>
     <dt>环境文件</dt><dd>${(config.loadedEnvFiles || []).length ? "已加载" : "未加载"}</dd>
-    <dt>视觉接口</dt><dd>${config.vision?.status || "reserved"}</dd>
+    <dt>视觉接口</dt><dd>${config.vision?.status === "integrated" ? "已接入" : (config.vision?.status || "待检查")}</dd>
   `;
 }
 
@@ -215,36 +215,16 @@ function showMainApp() {
   $("screenTitle").textContent = "花园";
 }
 
+function showLoginGate(message = "请先使用一键授权登录。") {
+  $("onboarding").classList.add("active");
+  document.querySelectorAll(".screen").forEach((screen) => screen.classList.remove("active"));
+  document.querySelectorAll(".tabbar button").forEach((btn) => btn.classList.remove("active"));
+  $("screenTitle").textContent = "登录";
+  setFeedback("authFeedback", message, true);
+}
+
 function userId() {
   return state.user?.user_id || state.user?.userId;
-}
-
-async function sendCode() {
-  try {
-    const data = await api("/api/mmy/auth/sms-code/send", {
-      method: "POST",
-      body: JSON.stringify({ phone: phone(), carrier: carrier() }),
-    });
-    $("codeInput").value = data.demoCode || "";
-    setFeedback("authFeedback", `${data.feedback} 有效期 ${data.expiresInSeconds}s。请求号：${data.gateway?.requestId || "-"}`);
-  } catch (error) {
-    setFeedback("authFeedback", error.message, true);
-  }
-}
-
-async function smsLogin() {
-  try {
-    const data = await api("/api/mmy/auth/sms-code/login", {
-      method: "POST",
-      body: JSON.stringify({ phone: phone(), code: $("codeInput").value.trim() }),
-    });
-    state.user = data.user;
-    updateLoginState();
-    persistSession();
-    setFeedback("authFeedback", "登录成功，请保存身体指征。");
-  } catch (error) {
-    setFeedback("authFeedback", error.message, true);
-  }
 }
 
 async function oneTapLogin() {
@@ -256,7 +236,7 @@ async function oneTapLogin() {
     state.user = data.user;
     updateLoginState();
     persistSession();
-    setFeedback("authFeedback", data.feedback);
+    setFeedback("authFeedback", `${data.feedback || "授权成功"}，请继续保存身体指征。`);
   } catch (error) {
     setFeedback("authFeedback", error.message, true);
   }
@@ -1151,23 +1131,41 @@ async function refreshReport() {
 
 function renderPie(items) {
   const colors = ["#8aa87f", "#dfc66a", "#c98265", "#9eb7c7"];
+  const normalized = (items || [])
+    .map((item) => ({ ...item, value: Number(item.value || 0), percent: Number(item.percent || 0) }))
+    .filter((item) => item.value > 0 || item.percent > 0);
+  const totalValue = normalized.reduce((sum, item) => sum + Math.max(0, item.value), 0);
+  const totalPercent = normalized.reduce((sum, item) => sum + Math.max(0, item.percent), 0);
+  if (!normalized.length || (!totalValue && !totalPercent)) {
+    $("pieChart").style.background = "#eadfce";
+    $("pieChart").dataset.summary = "暂无记录";
+    return;
+  }
   let cursor = 0;
-  const stops = items.map((item, index) => {
+  const stops = normalized.map((item, index) => {
     const start = cursor;
-    cursor += Number(item.percent || 0);
+    const percent = totalValue > 0 ? (Math.max(0, item.value) / totalValue) * 100 : (Math.max(0, item.percent) / totalPercent) * 100;
+    cursor += percent;
     return `${colors[index % colors.length]} ${start}% ${cursor}%`;
   });
-  $("pieChart").style.background = `conic-gradient(${stops.join(", ") || "#eadfce 0 100%"})`;
+  $("pieChart").style.background = `conic-gradient(${stops.join(", ")})`;
+  $("pieChart").dataset.summary = normalized
+    .map((item) => `${item.label}${Math.round(totalValue > 0 ? item.value : item.percent)}${totalValue > 0 ? (item.unit || "g") : "%"}`)
+    .join(" / ");
 }
 
 function renderBars(items) {
   $("barChart").innerHTML = items.map((item) => {
-    const pct = Math.min(100, Math.round((Number(item.actualValue || 0) / Math.max(1, Number(item.targetValue || 1))) * 100));
+    const actual = Number(item.actualValue || 0);
+    const target = Math.max(1, Number(item.targetValue || 1));
+    const rawPct = Math.round((actual / target) * 100);
+    const pct = Math.min(100, Math.max(0, rawPct));
+    const over = rawPct > 100;
     return `
-      <div class="bar-row">
+      <div class="bar-row ${over ? "over-target" : ""}">
         <span>${item.label}</span>
         <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
-        <span>${pct}%</span>
+        <span>${rawPct}%</span>
       </div>
     `;
   }).join("");
@@ -1209,6 +1207,10 @@ async function sendAgentMessage() {
 }
 
 function switchScreen(target) {
+  if (!state.user) {
+    showLoginGate("请先一键授权登录，登录后才能访问花园、信息和记录。");
+    return;
+  }
   $("onboarding").classList.remove("active");
   document.querySelectorAll(".screen").forEach((screen) => screen.classList.remove("active"));
   $(target).classList.add("active");
@@ -1218,8 +1220,6 @@ function switchScreen(target) {
 }
 
 function bindEvents() {
-  $("sendCodeBtn").addEventListener("click", sendCode);
-  $("loginBtn").addEventListener("click", smsLogin);
   $("oneTapBtn").addEventListener("click", oneTapLogin);
   $("logoutBtn").addEventListener("click", logout);
   $("saveProfileBtn").addEventListener("click", saveProfileAndGenerate);

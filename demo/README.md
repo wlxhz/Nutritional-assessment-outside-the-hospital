@@ -8,7 +8,7 @@
 ## 已开发内容
 
 - 慢慢养 App 页面：简约白色、米色基调，三页导航“花园 / 信息 / 记录”。
-- 慢慢养业务 API：手机号验证码、一键授权占位、基础身体指征、AI 营养方案、本地文件解析、摄入记录、报告、Agent、短信确认。
+- 慢慢养业务 API：一键授权登录、基础身体指征、AI 营养方案、本地文件解析、摄入记录、报告、Agent、短信确认。
 - 本地 SQLite：用户、身体指征、处方解析、营养方案、摄入记录、报告、Agent 消息和临时识别数据。
 - 视觉识别预留：`GET /api/mmy/vision/contract` 定义前端依赖字段，页面已保留视觉识别位置。
 - FastAPI 后端：会话、token、二维码、手机加入、采集事件、JPEG 帧上传、实时状态、最终报告。
@@ -123,8 +123,6 @@ https://192.168.x.x:8443
 慢慢养业务 API：
 
 - `GET /api/mmy/config`
-- `POST /api/mmy/auth/sms-code/send`
-- `POST /api/mmy/auth/sms-code/login`
 - `POST /api/mmy/auth/phone-one-tap`
 - `POST /api/mmy/user/profile`
 - `POST /api/mmy/prescriptions/upload`

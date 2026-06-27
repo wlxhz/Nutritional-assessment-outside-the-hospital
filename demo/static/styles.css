@@ -504,6 +504,101 @@ pre {
   margin-top: 12px;
 }
 
+.mobile-analysis {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(216, 245, 92, 0.18);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.mobile-analysis-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.mobile-analysis-head h2 {
+  margin: 0;
+  color: #f7ffe4;
+  font-size: 20px;
+}
+
+.mobile-analysis-head span {
+  flex: 0 0 auto;
+  color: #d7f5e6;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.mobile-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.mobile-metrics div {
+  min-width: 0;
+  padding: 10px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.26);
+}
+
+.mobile-metrics span,
+.mobile-foods span {
+  color: rgba(215, 245, 230, 0.78);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mobile-metrics strong {
+  display: block;
+  margin-top: 4px;
+  color: #f7ffe4;
+  font-size: 18px;
+}
+
+.mobile-foods {
+  display: grid;
+  gap: 8px;
+}
+
+.mobile-foods article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 2px solid rgba(216, 245, 92, 0.28);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.mobile-foods article.compliant {
+  border-color: #9dcf55;
+}
+
+.mobile-foods article.generally_compliant {
+  border-color: #efd67c;
+}
+
+.mobile-foods article.non_compliant {
+  border-color: #ff7c6e;
+}
+
+.mobile-foods strong {
+  display: block;
+  color: #f7ffe4;
+  font-size: 15px;
+}
+
+.mobile-foods b {
+  color: #f7ffe4;
+}
+
 @media (max-width: 1180px) {
   .dashboard-grid {
     grid-template-columns: 1fr 1fr;

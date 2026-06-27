@@ -46,7 +46,6 @@ class MmyStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.sms_codes: dict[str, dict[str, Any]] = {}
         self._init_db()
 
     def connect(self) -> sqlite3.Connection:
@@ -157,20 +156,6 @@ class MmyStore:
                 (user["user_id"], user["phone"], user["login_method"], user["created_at"]),
             )
             return user
-
-    def issue_code(self, phone: str) -> dict[str, Any]:
-        code = f"{secrets.randbelow(900000) + 100000}"
-        expires_at = datetime.now(CHINA_TZ) + timedelta(seconds=60)
-        self.sms_codes[phone] = {"code": code, "expires_at": expires_at}
-        return {"phone": phone, "code": code, "expires_in_seconds": 60}
-
-    def verify_code(self, phone: str, code: str) -> bool:
-        record = self.sms_codes.get(phone)
-        if not record:
-            return False
-        if datetime.now(CHINA_TZ) > record["expires_at"]:
-            return False
-        return secrets.compare_digest(record["code"], code)
 
     def save_profile(self, user_id: str, profile: dict[str, Any]) -> dict[str, Any]:
         payload = {**profile, "userId": user_id, "updatedAt": now_iso()}

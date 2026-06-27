@@ -24,8 +24,8 @@
           <div class="soft-panel">
             <div class="section-head">
               <div>
-                <p class="eyebrow">手机号登录</p>
-                <h2>先建立本地用户</h2>
+                <p class="eyebrow">授权登录</p>
+                <h2>一键进入慢慢养</h2>
               </div>
               <span class="mini-badge">SQLite</span>
             </div>
@@ -42,15 +42,7 @@
                 <option value="ctcc">中国电信</option>
               </select>
             </label>
-            <div class="split-actions">
-              <button id="oneTapBtn" class="secondary" type="button">一键授权</button>
-              <button id="sendCodeBtn" class="secondary" type="button">获取验证码</button>
-            </div>
-            <label class="field">
-              <span>验证码</span>
-              <input id="codeInput" inputmode="numeric" placeholder="本地 Demo 会返回验证码" />
-            </label>
-            <button id="loginBtn" class="primary" type="button">验证码登录</button>
+            <button id="oneTapBtn" class="primary" type="button">一键授权登录</button>
             <label class="check-field">
               <input id="rememberLogin" type="checkbox" checked />
               <span>记住登录状态</span>
@@ -193,7 +185,7 @@
               </div>
               <div class="vision-copy">
                 <strong id="visionGuidance">请创建识别会话。</strong>
-                <span id="visionMeta">手机扫码后授权摄像头，连续采集 5-10 秒。</span>
+                <span id="visionMeta">用手机或另一台电脑打开采集页，授权摄像头后连续采集 5-10 秒。</span>
                 <a id="captureLink" href="#" target="_blank" rel="noreferrer">打开采集页</a>
               </div>
             </div>
@@ -300,10 +292,10 @@
       </section>
 
       <aside class="dev-panel">
-        <h2>本地后端状态</h2>
-        <p>FastAPI + SQLite + 本地解析服务。视觉算法位置保留，不在此页面实现。</p>
+        <h2>当前后端状态</h2>
+        <p>FastAPI + SQLite + 视觉识别已接入。Dashboard 负责创建识别会话，手机或另一台设备作为摄像头采集端。</p>
         <dl id="devState"></dl>
-        <a href="/vision-dashboard">打开视觉算法 Dashboard</a>
+        <a href="/vision-dashboard">打开识别调试 Dashboard</a>
       </aside>
     </main>
     <script src="/static/app.js"></script>

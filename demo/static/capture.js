@@ -8,6 +8,7 @@ const capture = {
   facingMode: "environment",
   timer: null,
   healthTimer: null,
+  stateTimer: null,
   running: false,
   uploading: false,
   frameIntervalMs: 520,
@@ -22,6 +23,12 @@ qs("#cameraBtn").addEventListener("click", requestCamera);
 qs("#switchCameraBtn").addEventListener("click", switchCamera);
 qs("#streamBtn").addEventListener("click", toggleStream);
 
+const complianceLabels = {
+  compliant: "符合",
+  generally_compliant: "一般符合",
+  non_compliant: "非常不符合",
+};
+
 function setStatus(status, label) {
   const pill = qs("#mobileStatus");
   pill.textContent = label;
@@ -34,6 +41,79 @@ function setHint(message) {
 
 function setCameraDebug(message) {
   qs("#cameraDebug").textContent = message;
+}
+
+function foodName(food = {}) {
+  if (food.profile_key === "pork_floss_pastry") return "肉松糕点";
+  return food.name || food.itemName || "未命名食物";
+}
+
+function foodWeight(food = {}) {
+  return Number(food.weight_g || food.estimated_weight_g || food.grams || 0);
+}
+
+function foodCalories(food = {}) {
+  const nutrition = food.nutrition || {};
+  return Number(food.calories_kcal || nutrition.calories_kcal || food.caloriesKcal || 0);
+}
+
+function complianceForFood(food = {}) {
+  const profileKey = `${food.profile_key || food.profileKey || ""}`;
+  const name = `${food.name || food.itemName || ""}`;
+  const category = `${food.category || ""}`;
+  const cooking = `${food.cooking_method || ""}`;
+  const weight = Math.max(foodWeight(food), 1);
+  const caloriesPer100 = foodCalories(food) / weight * 100;
+  if (profileKey === "pork_floss_pastry" || cooking === "deep_fried" || category === "甜点" || category === "零食" || caloriesPer100 >= 320 || /高糖|甜点|蛋糕|奶茶|糖|炸|油炸|肥肉/.test(name)) {
+    return "non_compliant";
+  }
+  if (Number(food.confidence || 0) < 0.62 || caloriesPer100 >= 220 || ["pan_fried", "stir_fried", "braised"].includes(cooking)) {
+    return "generally_compliant";
+  }
+  return "compliant";
+}
+
+function renderRecognitionState(state = {}) {
+  const foods = state.foods || [];
+  const quality = state.measurement_quality || {};
+  const total = foods.reduce((acc, food) => {
+    acc.weight += foodWeight(food);
+    acc.calories += foodCalories(food);
+    return acc;
+  }, { weight: 0, calories: 0 });
+  qs("#mobileFrameMeta").textContent = `${state.frame_count || 0} 帧 / 已分析 ${state.analyzed_frame_count || 0}`;
+  qs("#mobileTotalWeight").textContent = `${Math.round(total.weight)}g`;
+  qs("#mobileTotalCalories").textContent = `${Math.round(total.calories)}kcal`;
+  qs("#mobileQuality").textContent = `${Math.round(Number(quality.overall || 0) * 100)}%`;
+  qs("#mobileFoods").innerHTML = foods.length ? foods.map((food) => {
+    const level = complianceForFood(food);
+    return `
+      <article class="${level}">
+        <div>
+          <strong>${foodName(food)}</strong>
+          <span>${food.cooking_method_name || "估算"} · ${complianceLabels[level]}</span>
+        </div>
+        <b>${Math.round(foodWeight(food))}g</b>
+      </article>
+    `;
+  }).join("") : `<span>等待识别食物主体。请保持餐盘在框内并缓慢移动镜头。</span>`;
+}
+
+async function refreshRecognitionState() {
+  if (!capture.sessionId) return;
+  try {
+    const response = await fetch(`/api/sessions/${capture.sessionId}/state`, { cache: "no-store" });
+    if (!response.ok) throw new Error(await response.text());
+    renderRecognitionState(await response.json());
+  } catch (error) {
+    qs("#mobileFoods").innerHTML = `<span>识别状态同步失败：${error.message}</span>`;
+  }
+}
+
+function startStatePolling() {
+  if (capture.stateTimer) window.clearInterval(capture.stateTimer);
+  capture.stateTimer = window.setInterval(refreshRecognitionState, 1300);
+  refreshRecognitionState();
 }
 
 function videoStatus() {
@@ -164,9 +244,10 @@ async function joinSession() {
     return;
   }
   setStatus("ready", "已连接");
-  setHint("会话已连接。请点击“授权摄像头”，Android 浏览器会弹出权限确认。");
+  setHint("会话已连接。当前设备会作为摄像头采集端；也可以用电脑或另一台手机打开此页模拟手机采集。请点击“授权摄像头”。");
   qs("#cameraBtn").disabled = false;
   qs("#joinBtn").disabled = true;
+  startStatePolling();
 }
 
 async function requestCamera() {
@@ -283,6 +364,7 @@ async function uploadFrame() {
     });
     if (!response.ok) throw new Error(await response.text());
     const state = await response.json();
+    renderRecognitionState(state);
     capture.sentFrames += 1;
     setStatus("streaming", `推流中 ${capture.sentFrames}`);
     setHint(`${state.guidance.message}\n已上传 ${capture.sentFrames} 帧，后端已分析 ${state.analyzed_frame_count || 0} 帧。`);
