@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 from backend.models.schemas import Nutrition
 
@@ -36,10 +36,8 @@ def f(
     return FoodProfile(key, name, category, density, density_std, kcal, protein, carbs, fat, fiber, sodium)
 
 
-# Nutrition values are approximate per-100g entries for product validation.
-# They are seeded from public food-composition references such as USDA FoodData
-# Central and China Food Composition Table categories, then normalized for this
-# MVP's density -> weight -> nutrition pipeline.
+# Approximate per-100g values for demo validation. They are normalized for this
+# MVP's density -> weight -> nutrition pipeline and should not replace weighing.
 FOOD_PROFILES: dict[str, FoodProfile] = {
     # Staples
     "rice": f("rice", "米饭", "主食", 0.72, 0.08, 116, 2.6, 25.9, 0.3, 0.4, 1),
@@ -105,7 +103,7 @@ FOOD_PROFILES: dict[str, FoodProfile] = {
     "banana": f("banana", "香蕉", "水果", 0.66, 0.08, 89, 1.1, 22.8, 0.3, 2.6, 1),
     "orange": f("orange", "橙子", "水果", 0.62, 0.08, 47, 0.9, 11.8, 0.1, 2.4, 0),
     "watermelon": f("watermelon", "西瓜", "水果", 0.58, 0.08, 30, 0.6, 7.6, 0.2, 0.4, 1),
-    # Common mixed dishes for fallback reports
+    # Common mixed dishes
     "tomato_egg": f("tomato_egg", "番茄炒蛋", "混合菜", 0.78, 0.14, 98, 6.2, 4.2, 6.5, 0.8, 220),
     "mapo_tofu": f("mapo_tofu", "麻婆豆腐", "混合菜", 0.88, 0.16, 128, 8.0, 5.0, 8.5, 1.2, 420),
     "stir_fried_greens": f("stir_fried_greens", "炒青菜", "混合菜", 0.62, 0.14, 55, 2.2, 5.0, 3.2, 2.0, 260),

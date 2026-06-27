@@ -6,8 +6,12 @@ const capture = {
   token: params.get("token"),
   stream: null,
   timer: null,
+  running: false,
   uploading: false,
-  frameIntervalMs: 900,
+  frameIntervalMs: 520,
+  retryDelayMs: 900,
+  sentFrames: 0,
+  failedFrames: 0,
 };
 
 qs("#mobileSessionId").value = capture.sessionId || "missing";
@@ -72,7 +76,7 @@ async function requestCamera() {
     qs("#cameraEmpty").style.display = "none";
     qs("#streamBtn").disabled = false;
     setStatus("ready", "摄像头就绪");
-    setHint("摄像头已授权。请将餐盘放入框内，然后开始推流。");
+    setHint("摄像头已授权。请将餐盘放入框内，然后开始连续推流。");
     await sendEvent("camera_permission_granted", { tracks: stream.getVideoTracks().map((track) => track.label) });
   } catch (error) {
     setStatus("error", "授权失败");
@@ -82,12 +86,13 @@ async function requestCamera() {
 }
 
 async function toggleStream() {
-  if (capture.timer) {
-    clearInterval(capture.timer);
+  if (capture.running) {
+    capture.running = false;
+    if (capture.timer) window.clearTimeout(capture.timer);
     capture.timer = null;
     qs("#streamBtn").textContent = "开始推流";
     setStatus("ready", "已暂停");
-    setHint("推流已暂停，可以重新开始。");
+    setHint(`推流已暂停。本次已上传 ${capture.sentFrames} 帧，失败 ${capture.failedFrames} 帧。`);
     await sendEvent("stream_stopped");
     return;
   }
@@ -95,28 +100,39 @@ async function toggleStream() {
     setHint("请先授权摄像头。");
     return;
   }
+  capture.running = true;
+  capture.sentFrames = 0;
+  capture.failedFrames = 0;
   await sendEvent("stream_started");
   qs("#streamBtn").textContent = "停止推流";
   setStatus("streaming", "推流中");
-  setHint("正在上传视频帧。请缓慢绕餐盘移动，补充侧面角度。");
-  capture.timer = setInterval(uploadFrame, capture.frameIntervalMs);
-  uploadFrame();
+  setHint("正在连续上传视频帧。请缓慢绕餐盘移动，采集越久估重越稳定。");
+  scheduleNextFrame(0);
+}
+
+function scheduleNextFrame(delayMs = capture.frameIntervalMs) {
+  if (!capture.running) return;
+  if (capture.timer) window.clearTimeout(capture.timer);
+  capture.timer = window.setTimeout(uploadFrame, delayMs);
 }
 
 async function uploadFrame() {
-  if (capture.uploading || !capture.stream) return;
+  if (capture.uploading || !capture.stream || !capture.running) return;
   const video = qs("#cameraPreview");
-  if (!video.videoWidth || !video.videoHeight) return;
+  if (!video.videoWidth || !video.videoHeight) {
+    scheduleNextFrame(180);
+    return;
+  }
   capture.uploading = true;
   try {
     const canvas = qs("#captureCanvas");
-    const targetWidth = Math.min(480, video.videoWidth);
-    const targetHeight = Math.round(targetWidth * video.videoHeight / video.videoWidth);
+    const targetWidth = Math.min(640, video.videoWidth);
+    const targetHeight = Math.round((targetWidth * video.videoHeight) / video.videoWidth);
     canvas.width = targetWidth;
     canvas.height = targetHeight;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: false });
     ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-    const image = canvas.toDataURL("image/jpeg", 0.58);
+    const image = canvas.toDataURL("image/jpeg", 0.62);
     const payload = {
       token: capture.token,
       image,
@@ -129,13 +145,19 @@ async function uploadFrame() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      cache: "no-store",
     });
     if (!response.ok) throw new Error(await response.text());
     const state = await response.json();
-    setHint(state.guidance.message);
+    capture.sentFrames += 1;
+    setStatus("streaming", `推流中 ${capture.sentFrames}`);
+    setHint(`${state.guidance.message}\n已上传 ${capture.sentFrames} 帧，后端已分析 ${state.analyzed_frame_count || 0} 帧。`);
+    scheduleNextFrame(capture.frameIntervalMs);
   } catch (error) {
-    setStatus("error", "上传失败");
-    setHint(`上传失败：${error.message}`);
+    capture.failedFrames += 1;
+    setStatus("streaming", "重试中");
+    setHint(`上传短暂失败，正在继续重试：${error.message}`);
+    scheduleNextFrame(capture.retryDelayMs);
   } finally {
     capture.uploading = false;
   }
@@ -152,8 +174,8 @@ async function sendEvent(event, payload = {}) {
 
 if (!window.isSecureContext) {
   setStatus("error", "非安全上下文");
-  setHint("当前页面不是安全上下文。Android 真机摄像头授权通常需要 HTTPS；请使用 README 中的 HTTPS 启动方式或内网穿透 HTTPS 地址。");
+  setHint("当前页面不是安全上下文。Android 真机摄像头授权通常需要 HTTPS，请使用二维码中的 HTTPS 地址。");
 } else {
   setStatus("waiting", "待连接");
-  setHint("请点击“连接会话”。");
+  setHint("请先点击“连接会话”。");
 }

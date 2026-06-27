@@ -42,9 +42,9 @@
           </div>
           <ul class="connection-list">
             <li><b></b>Android 浏览器 getUserMedia 授权</li>
-            <li><b></b>Canvas 抽帧 JPEG 上传</li>
-            <li><b></b>FastAPI 分析 + WebSocket 推送</li>
-            <li><b></b>YOLOv11 可选，OpenCV fallback</li>
+            <li><b></b>Canvas 连续抽帧 JPEG 上传</li>
+            <li><b></b>FastAPI 后台分析 + WebSocket 推送</li>
+            <li><b></b>多帧聚合：时间越长误差越小</li>
           </ul>
         </aside>
 
@@ -58,7 +58,7 @@
           </div>
           <div class="video-stage">
             <img id="latestFrame" alt="手机最新上传画面" />
-            <svg id="overlaySvg" viewBox="0 0 1280 720" preserveAspectRatio="none"></svg>
+            <svg id="overlaySvg" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMid meet"></svg>
             <div id="emptyVideo" class="empty-video">等待手机授权摄像头并开始采集</div>
             <div id="guidanceBadge" class="guidance">请新建测量并扫码</div>
           </div>
@@ -70,7 +70,12 @@
             <strong id="overallConfidence">0%</strong>
           </div>
           <div class="summary-metrics">
-            <div><span>总重量</span><strong id="totalWeight">0g</strong></div>
+            <div>
+              <span>总重量</span>
+              <strong id="totalWeight">0g</strong>
+              <small id="totalWeightError">±0g</small>
+            </div>
+            <div><span>收敛度</span><strong id="overallConvergence">0%</strong></div>
             <div><span>热量</span><strong id="totalCalories">0kcal</strong></div>
             <div><span>蛋白质</span><strong id="totalProtein">0g</strong></div>
             <div><span>碳水</span><strong id="totalCarbs">0g</strong></div>
@@ -98,12 +103,14 @@
                   <th>食物</th>
                   <th>track_id</th>
                   <th>克重</th>
-                  <th>误差</th>
                   <th>体积</th>
                   <th>热量</th>
                   <th>蛋白质</th>
                   <th>碳水</th>
                   <th>脂肪</th>
+                  <th>稳定帧</th>
+                  <th>稳定时长</th>
+                  <th>收敛度</th>
                   <th>置信度</th>
                 </tr>
               </thead>

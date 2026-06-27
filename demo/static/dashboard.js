@@ -11,10 +11,10 @@ const qualityLabels = [
   ["angle_coverage", "视角覆盖"],
   ["depth_completeness", "深度完整度"],
   ["mask_stability", "分割稳定性"],
-  ["motion_quality", "运动质量"],
+  ["motion_quality", "连续采集"],
   ["lighting", "光照质量"],
   ["blur", "清晰度"],
-  ["plate_visibility", "餐盘可见"],
+  ["plate_visibility", "食物可见"],
 ];
 
 qs("#createSessionBtn").addEventListener("click", createSession);
@@ -73,7 +73,7 @@ async function copyCaptureUrl() {
 function render(nextState) {
   state.latest = nextState;
   updateStatus(nextState.status, statusLabel(nextState.status));
-  qs("#videoMeta").textContent = `${nextState.video.resolution} · ${nextState.video.fps} FPS · ${nextState.elapsed_seconds}s`;
+  qs("#videoMeta").textContent = `${nextState.video.resolution} · ${nextState.video.fps} FPS · 接收 ${nextState.frame_count} 帧 · 分析 ${nextState.analyzed_frame_count || 0} 帧 · ${nextState.elapsed_seconds}s`;
   qs("#analyzerLabel").textContent = `Analyzer: ${nextState.analyzer} / ${nextState.model_name}`;
   qs("#guidanceBadge").textContent = nextState.guidance.message;
   qs("#frameCount").textContent = `${nextState.frame_count} frames`;
@@ -82,7 +82,7 @@ function render(nextState) {
     qs("#latestFrame").src = `${nextState.latest_frame_url}&v=${nextState.frame_count}`;
     qs("#emptyVideo").style.display = "none";
     if (!nextState.foods.length && nextState.frame_count > 0) {
-      qs("#guidanceBadge").textContent = "已收到手机画面，正在分析当前帧。";
+      qs("#guidanceBadge").textContent = "已收到手机画面，正在寻找稳定食物主体。";
     }
   }
 
@@ -94,19 +94,22 @@ function render(nextState) {
 
 function renderOverlay(nextState) {
   const svg = qs("#overlaySvg");
-  const resolution = nextState.video.resolution.split("x").map((value) => Number(value));
-  const width = resolution[0] || 1280;
-  const height = resolution[1] || 720;
+  const [width = 1280, height = 720] = nextState.video.resolution.split("x").map((value) => Number(value));
+  const frameArea = Math.max(1, width * height);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = "";
   nextState.foods.forEach((food) => {
     const [x1, y1, x2, y2] = food.bbox;
+    const bboxArea = Math.max(1, (x2 - x1) * (y2 - y1));
+    if (bboxArea / frameArea > 0.5) return;
+
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", food.mask_svg_path || `M ${x1} ${y1} L ${x2} ${y1} L ${x2} ${y2} L ${x1} ${y2} Z`);
     path.setAttribute("fill", food.color);
-    path.setAttribute("fill-opacity", "0.22");
+    path.setAttribute("fill-opacity", food.state === "lost" ? "0.06" : "0.12");
     path.setAttribute("stroke", food.color);
-    path.setAttribute("stroke-width", "4");
+    path.setAttribute("stroke-width", "3");
+    path.setAttribute("stroke-linejoin", "round");
     svg.appendChild(path);
 
     const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
@@ -116,32 +119,48 @@ function renderOverlay(nextState) {
     rect.setAttribute("height", y2 - y1);
     rect.setAttribute("fill", "none");
     rect.setAttribute("stroke", food.color);
-    rect.setAttribute("stroke-width", "3");
+    rect.setAttribute("stroke-width", "2");
+    rect.setAttribute("stroke-dasharray", food.state === "lost" ? "8 8" : "0");
     svg.appendChild(rect);
 
+    const labelX = Math.max(6, Math.min(width - 220, x1));
+    const labelY = Math.max(28, y1 - 10);
+    const labelBg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    labelBg.setAttribute("x", labelX);
+    labelBg.setAttribute("y", labelY - 24);
+    labelBg.setAttribute("width", "210");
+    labelBg.setAttribute("height", "28");
+    labelBg.setAttribute("rx", "4");
+    labelBg.setAttribute("fill", "rgba(7, 12, 9, 0.82)");
+    labelBg.setAttribute("stroke", food.color);
+    labelBg.setAttribute("stroke-width", "1");
+    svg.appendChild(labelBg);
+
     const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    label.setAttribute("x", x1);
-    label.setAttribute("y", Math.max(24, y1 - 8));
-    label.setAttribute("fill", food.color);
-    label.setAttribute("font-size", "22");
+    label.setAttribute("x", labelX + 8);
+    label.setAttribute("y", labelY - 6);
+    label.setAttribute("fill", "#f7fff9");
+    label.setAttribute("font-size", "16");
     label.setAttribute("font-weight", "800");
-    label.textContent = `${food.name} ${Math.round(food.estimated_weight_g)}g ${Math.round(food.weight_confidence * 100)}%`;
+    label.textContent = `${food.name} ${Math.round(food.estimated_weight_g)}±${Math.round(food.weight_error_g)}g`;
     svg.appendChild(label);
   });
 }
 
 function renderFoods(foods) {
   qs("#foodRows").innerHTML = foods.map((food) => `
-    <tr>
-      <td>${food.name}<small>${food.category}</small></td>
+    <tr class="${food.state === "lost" ? "lost-row" : ""}">
+      <td>${food.name}<small>${food.category} · ${food.state === "lost" ? "短暂丢失" : "跟踪中"}</small></td>
       <td>${food.track_id}</td>
-      <td>${food.estimated_weight_g}g</td>
-      <td>±${food.weight_error_g}g</td>
+      <td><strong>${food.estimated_weight_g}g</strong><small>±${food.weight_error_g}g</small></td>
       <td>${food.volume_ml}ml</td>
       <td>${food.nutrition.calories_kcal}kcal</td>
       <td>${food.nutrition.protein_g}g</td>
       <td>${food.nutrition.carbs_g}g</td>
       <td>${food.nutrition.fat_g}g</td>
+      <td>${food.sample_count || food.visible_frames || 1}</td>
+      <td>${(food.stable_seconds || 0).toFixed(1)}s</td>
+      <td>${Math.round((food.convergence || 0) * 100)}%</td>
       <td>${Math.round(food.weight_confidence * 100)}%</td>
     </tr>
   `).join("");
@@ -150,19 +169,24 @@ function renderFoods(foods) {
 function renderSummary(foods) {
   const total = foods.reduce((acc, food) => {
     acc.weight += food.estimated_weight_g;
+    acc.error2 += food.weight_error_g ** 2;
     acc.calories += food.nutrition.calories_kcal;
     acc.protein += food.nutrition.protein_g;
     acc.carbs += food.nutrition.carbs_g;
     acc.fat += food.nutrition.fat_g;
     acc.confidence += food.weight_confidence;
+    acc.convergence += food.convergence || 0;
     return acc;
-  }, { weight: 0, calories: 0, protein: 0, carbs: 0, fat: 0, confidence: 0 });
+  }, { weight: 0, error2: 0, calories: 0, protein: 0, carbs: 0, fat: 0, confidence: 0, convergence: 0 });
+  const error = Math.sqrt(total.error2);
   qs("#totalWeight").textContent = `${total.weight.toFixed(1)}g`;
+  qs("#totalWeightError").textContent = `±${error.toFixed(1)}g`;
   qs("#totalCalories").textContent = `${total.calories.toFixed(1)}kcal`;
   qs("#totalProtein").textContent = `${total.protein.toFixed(1)}g`;
   qs("#totalCarbs").textContent = `${total.carbs.toFixed(1)}g`;
   qs("#totalFat").textContent = `${total.fat.toFixed(1)}g`;
   qs("#overallConfidence").textContent = `${Math.round((foods.length ? total.confidence / foods.length : 0) * 100)}%`;
+  qs("#overallConvergence").textContent = `${Math.round((foods.length ? total.convergence / foods.length : 0) * 100)}%`;
 }
 
 function renderQuality(quality) {

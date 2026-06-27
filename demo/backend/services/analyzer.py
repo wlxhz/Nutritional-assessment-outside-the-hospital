@@ -26,15 +26,17 @@ class DecodedFrame:
     jpg_bytes: bytes
 
 
-class FoodAnalyzer:
-    """Frame analyzer with YOLOv11 optional inference and conservative fallback.
+@dataclass
+class FoodComponent:
+    bbox: list[int]
+    area_px: int
+    polygon: list[list[int]]
+    score: float
+    crop: np.ndarray
 
-    The fallback must not invent food when the camera is pointed at keyboards,
-    monitors, desks, or other non-food scenes. It therefore uses a reject-first
-    strategy: detect obvious electronic/keyboard geometry, extract food-like
-    color blobs, and only emit tracks when the food-likeness score passes a
-    threshold.
-    """
+
+class FoodAnalyzer:
+    """Frame analyzer with optional YOLOv11 and conservative OpenCV fallback."""
 
     def __init__(self) -> None:
         self.model = None
@@ -52,7 +54,7 @@ class FoodAnalyzer:
             self.model = YOLO(str(model_path))
             self.model_name = model_path.name
             self.backend_name = "yolo11-seg"
-        except Exception as exc:  # pragma: no cover - defensive runtime path
+        except Exception as exc:  # pragma: no cover - runtime dependency path
             self.model = None
             self.model_name = f"opencv-fallback ({exc.__class__.__name__})"
             self.backend_name = "opencv-fallback"
@@ -94,7 +96,7 @@ class FoodAnalyzer:
         polygons: list[list[list[int]]] = []
         if masks is not None and getattr(masks, "xy", None) is not None:
             for poly in masks.xy:
-                polygons.append([[int(x), int(y)] for x, y in poly[:80]])
+                polygons.append(self._simplify_polygon([[int(x), int(y)] for x, y in poly]))
 
         for idx, box in enumerate(boxes):
             xyxy = box.xyxy[0].tolist()
@@ -102,9 +104,23 @@ class FoodAnalyzer:
             raw_label = str(names.get(cls_id, "food")).lower()
             confidence = float(box.conf[0].item()) if getattr(box, "conf", None) is not None else 0.5
             bbox = [int(max(0, xyxy[0])), int(max(0, xyxy[1])), int(min(frame.width, xyxy[2])), int(min(frame.height, xyxy[3]))]
+            if self._region_is_unusable(bbox, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]), frame.width, frame.height):
+                continue
             profile = self._profile_from_label(raw_label, idx)
-            polygon = polygons[idx] if idx < len(polygons) else self._bbox_polygon(bbox)
-            tracks.append(self._track_from_region(f"food_{idx + 1}", profile, bbox, polygon, confidence, frame.width, frame.height))
+            polygon = polygons[idx] if idx < len(polygons) and polygons[idx] else self._bbox_polygon(bbox)
+            area_px = max(1, self._polygon_area(polygon) or (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+            tracks.append(
+                self._track_from_region(
+                    f"food_{idx + 1}",
+                    profile,
+                    bbox,
+                    polygon,
+                    confidence,
+                    frame.width,
+                    frame.height,
+                    area_px=area_px,
+                )
+            )
         return tracks[:6]
 
     def _profile_from_label(self, label: str, index: int) -> FoodProfile:
@@ -134,22 +150,33 @@ class FoodAnalyzer:
             return []
 
         mask = self._food_candidate_mask(arr)
-        components = self._connected_components(mask, min_area=max(350, int(width * height * 0.006)))
+        components = self._food_components(arr, mask, min_area=max(300, int(width * height * 0.0035)))
+        if not components:
+            return []
+
         food_score = self._food_likeness_score(arr, mask, components)
-        if food_score < 0.2 or not components:
+        if food_score < 0.18:
             return []
 
         tracks: list[FoodTrack] = []
         for idx, component in enumerate(components[:6]):
-            x1, y1, x2, y2, area = component
-            crop = arr[y1:y2, x1:x2]
-            profile = self._profile_from_color(crop, idx)
-            bbox = [x1, y1, x2, y2]
-            polygon = self._bbox_polygon(bbox)
-            area_score = area / max(width * height, 1)
-            confidence = min(0.9, 0.34 + food_score * 0.44 + area_score * 1.5 + frame_count * 0.002)
-            if confidence >= 0.35:
-                tracks.append(self._track_from_region(f"food_{idx + 1}", profile, bbox, polygon, confidence, width, height))
+            profile = self._profile_from_color(component.crop, idx)
+            area_score = component.area_px / max(width * height, 1)
+            confidence = min(0.9, 0.36 + food_score * 0.34 + component.score * 0.22 + area_score * 1.1 + frame_count * 0.0015)
+            if confidence < 0.38:
+                continue
+            tracks.append(
+                self._track_from_region(
+                    f"food_{idx + 1}",
+                    profile,
+                    component.bbox,
+                    component.polygon,
+                    confidence,
+                    width,
+                    height,
+                    area_px=component.area_px,
+                )
+            )
         return tracks
 
     @staticmethod
@@ -162,14 +189,240 @@ class FoodAnalyzer:
         blue = arr[:, :, 2].astype(np.int16)
         channel_range = np.max(arr, axis=2).astype(np.int16) - np.min(arr, axis=2).astype(np.int16)
 
-        green_food = (green > red + 16) & (green > blue + 12) & (green > 55)
-        warm_food = (red > 120) & (green > 70) & (blue < 165) & ((red - blue) > 24)
-        orange_food = (red > 145) & (green > 80) & (green < 190) & (blue < 130)
-        pale_food = (red > 150) & (green > 135) & (blue > 105) & (value > 125) & (channel_range < 95)
-        tomato_red = (red > 145) & (green < 125) & (blue < 120) & (saturation > 45)
+        green_food = (green > red + 14) & (green > blue + 10) & (green > 55) & (saturation > 38)
+        warm_food = (red > 120) & (green > 68) & (blue < 172) & ((red - blue) > 22) & (saturation > 35)
+        orange_food = (red > 145) & (green > 76) & (green < 198) & (blue < 140)
+        pale_food = (red > 158) & (green > 142) & (blue > 110) & (value > 132) & (channel_range < 82)
+        tomato_red = (red > 145) & (green < 128) & (blue < 125) & (saturation > 48)
+        dark_food = (red > 68) & (red < 145) & (green > 38) & (green < 125) & (blue < 115) & (saturation > 38)
 
-        mask = (green_food | warm_food | orange_food | pale_food | tomato_red) & (value > 45)
-        return FoodAnalyzer._smooth_mask(mask)
+        very_low_texture = (saturation < 25) & (channel_range < 30)
+        overexposed = value > 245
+        mask = (green_food | warm_food | orange_food | pale_food | tomato_red | dark_food) & (value > 42)
+        mask = mask & ~very_low_texture & ~overexposed
+        mask = FoodAnalyzer._smooth_mask(mask)
+        return FoodAnalyzer._shrink_overfull_mask(arr, mask)
+
+    @staticmethod
+    def _shrink_overfull_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Recover a food-sized blob when color thresholds cover the scene.
+
+        Warm wrappers, paper bags, or a tinted dashboard screenshot can make
+        almost every pixel look food-colored. In that case the right answer is
+        not "one full-screen food", but a smaller high-saturation subject region.
+        """
+        height, width = mask.shape
+        if float(mask.mean()) <= 0.54:
+            return mask
+
+        hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+        sat_cutoff = max(135, int(np.percentile(saturation, 64)))
+        strong = mask & (saturation >= sat_cutoff) & (value > 68)
+        strong = FoodAnalyzer._smooth_mask(strong)
+
+        if float(strong.mean()) > 0.48:
+            row_density = strong.mean(axis=1)
+            col_density = strong.mean(axis=0)
+            y1, y2 = FoodAnalyzer._dense_span(row_density, min_density=0.22, pad=max(8, height // 24))
+            x1, x2 = FoodAnalyzer._dense_span(col_density, min_density=0.16, pad=max(8, width // 24))
+            if y2 - y1 >= height * 0.18 and x2 - x1 >= width * 0.18:
+                limited = np.zeros_like(strong, dtype=bool)
+                limited[y1:y2, x1:x2] = strong[y1:y2, x1:x2]
+                strong = limited
+
+        if float(strong.mean()) < 0.015 or float(strong.mean()) > 0.48:
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            edges = cv2.Canny(gray, 50, 130)
+            edge_band = cv2.dilate(edges, np.ones((7, 7), dtype=np.uint8), iterations=1) > 0
+            textured = mask & edge_band & (saturation > 95)
+            strong = FoodAnalyzer._smooth_mask(textured)
+
+        if float(strong.mean()) < 0.01:
+            return np.zeros_like(mask, dtype=bool)
+        return strong
+
+    @staticmethod
+    def _dense_span(density: np.ndarray, min_density: float, pad: int) -> tuple[int, int]:
+        active = density >= min_density
+        if not active.any():
+            return 0, len(density)
+        best_start = 0
+        best_end = 0
+        start: int | None = None
+        for idx, item in enumerate(active.tolist() + [False]):
+            if item and start is None:
+                start = idx
+            elif not item and start is not None:
+                if idx - start > best_end - best_start:
+                    best_start, best_end = start, idx
+                start = None
+        return max(0, best_start - pad), min(len(density), best_end + pad)
+
+    def _food_components(self, arr: np.ndarray, mask: np.ndarray, min_area: int) -> list[FoodComponent]:
+        height, width = mask.shape
+        frame_area = max(width * height, 1)
+        labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+        components: list[FoodComponent] = []
+        for label in range(1, labels_count):
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            bbox = [x, y, x + w, y + h]
+            if area < min_area:
+                continue
+
+            component_mask = (labels[y : y + h, x : x + w] == label).astype(np.uint8) * 255
+            crop = arr[y : y + h, x : x + w]
+            refined = self._refine_oversized_component(arr, component_mask, bbox, area, width, height)
+            if refined is not None:
+                bbox, component_mask, crop, area = refined
+                x, y, x2, y2 = bbox
+                w, h = x2 - x, y2 - y
+            if self._region_is_unusable(bbox, area, width, height):
+                continue
+            score = self._component_score(crop, component_mask, bbox, area, width, height)
+            if score < 0.34:
+                continue
+            polygon = self._contour_polygon(component_mask, x, y) or self._bbox_polygon(bbox)
+            components.append(FoodComponent(bbox=bbox, area_px=area, polygon=polygon, score=score, crop=crop))
+        components.sort(key=lambda item: (item.score, item.area_px / frame_area), reverse=True)
+        return components[:8]
+
+    @staticmethod
+    def _refine_oversized_component(
+        arr: np.ndarray,
+        component_mask: np.ndarray,
+        bbox: list[int],
+        area: int,
+        frame_width: int,
+        frame_height: int,
+    ) -> tuple[list[int], np.ndarray, np.ndarray, int] | None:
+        x1, y1, x2, y2 = bbox
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        frame_area = max(1, frame_width * frame_height)
+        bbox_ratio = width * height / frame_area
+        area_ratio = area / frame_area
+        if bbox_ratio <= 0.52 and area_ratio <= 0.36:
+            return None
+
+        crop = arr[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+        hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+        mask_bool = component_mask > 0
+        sat_values = saturation[mask_bool]
+        if sat_values.size == 0:
+            return None
+        cutoff = max(145, int(np.percentile(sat_values, 58)))
+        subject = mask_bool & (saturation >= cutoff) & (value > 70)
+        if float(subject.mean()) < 0.03:
+            cutoff = max(115, int(np.percentile(sat_values, 45)))
+            subject = mask_bool & (saturation >= cutoff) & (value > 65)
+
+        if float(subject.mean()) < 0.03:
+            return None
+
+        row_density = subject.mean(axis=1)
+        col_density = subject.mean(axis=0)
+        row_threshold = min(0.30, max(0.12, float(np.percentile(row_density[row_density > 0], 24)) if (row_density > 0).any() else 0.12))
+        col_threshold = min(0.24, max(0.08, float(np.percentile(col_density[col_density > 0], 18)) if (col_density > 0).any() else 0.08))
+        local_y1, local_y2 = FoodAnalyzer._dense_span(row_density, row_threshold, pad=max(6, height // 18))
+        local_x1, local_x2 = FoodAnalyzer._dense_span(col_density, col_threshold, pad=max(6, width // 18))
+        if local_y2 - local_y1 < frame_height * 0.12 or local_x2 - local_x1 < frame_width * 0.12:
+            ys, xs = np.where(subject)
+            if len(xs) == 0 or len(ys) == 0:
+                return None
+            local_x1, local_x2 = int(np.percentile(xs, 2)), int(np.percentile(xs, 98)) + 1
+            local_y1, local_y2 = int(np.percentile(ys, 2)), int(np.percentile(ys, 98)) + 1
+            pad_x = max(8, width // 22)
+            pad_y = max(8, height // 22)
+            local_x1, local_x2 = max(0, local_x1 - pad_x), min(width, local_x2 + pad_x)
+            local_y1, local_y2 = max(0, local_y1 - pad_y), min(height, local_y2 + pad_y)
+
+        # The high-saturation subject can fragment into crumbs on fried or
+        # breaded foods. Use it to locate a food-sized window, then keep the
+        # original food-color pixels inside that window for area estimation.
+        window_mask = np.zeros_like(mask_bool, dtype=bool)
+        window_mask[local_y1:local_y2, local_x1:local_x2] = mask_bool[local_y1:local_y2, local_x1:local_x2]
+        window_mask = FoodAnalyzer._smooth_mask(window_mask)
+        ys, xs = np.where(window_mask)
+        if len(xs) == 0 or len(ys) == 0:
+            return None
+        rx = int(xs.min())
+        ry = int(ys.min())
+        rw = int(xs.max() - rx + 1)
+        rh = int(ys.max() - ry + 1)
+        refined_area = int(window_mask.sum())
+        if refined_area < max(300, int(frame_area * 0.003)):
+            return None
+        global_bbox = [x1 + rx, y1 + ry, x1 + rx + rw, y1 + ry + rh]
+        refined_mask = window_mask[ry : ry + rh, rx : rx + rw].astype(np.uint8) * 255
+        refined_crop = arr[global_bbox[1] : global_bbox[3], global_bbox[0] : global_bbox[2]]
+        return global_bbox, refined_mask, refined_crop, refined_area
+
+    @staticmethod
+    def _region_is_unusable(bbox: list[int], area: int, frame_width: int, frame_height: int) -> bool:
+        x1, y1, x2, y2 = bbox
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        frame_area = max(1, frame_width * frame_height)
+        area_ratio = area / frame_area
+        bbox_ratio = (width * height) / frame_area
+        touches = sum([x1 <= 2, y1 <= 2, x2 >= frame_width - 2, y2 >= frame_height - 2])
+        if area_ratio > 0.36 or bbox_ratio > 0.52:
+            return True
+        if width / max(frame_width, 1) > 0.86 or height / max(frame_height, 1) > 0.86:
+            return True
+        if touches >= 2 and bbox_ratio > 0.24:
+            return True
+        aspect = width / height
+        if aspect > 8.0 or aspect < 0.12:
+            return True
+        return False
+
+    @staticmethod
+    def _component_score(crop: np.ndarray, component_mask: np.ndarray, bbox: list[int], area: int, frame_width: int, frame_height: int) -> float:
+        if crop.size == 0:
+            return 0
+        selected = crop[component_mask > 0]
+        if selected.size == 0:
+            return 0
+        hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+        selected_hsv = hsv[component_mask > 0]
+        saturation_mean = float(selected_hsv[:, 1].mean() / 255)
+        value_mean = float(selected_hsv[:, 2].mean() / 255)
+        color_std = float(np.std(selected, axis=0).mean() / 64)
+        x1, y1, x2, y2 = bbox
+        bbox_area = max(1, (x2 - x1) * (y2 - y1))
+        fill_ratio = area / bbox_area
+        frame_center_x = frame_width / 2
+        frame_center_y = frame_height / 2
+        center_x = (x1 + x2) / 2
+        center_y = (y1 + y2) / 2
+        distance = math.hypot((center_x - frame_center_x) / frame_width, (center_y - frame_center_y) / frame_height)
+        centrality = max(0, 1 - distance * 1.85)
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 70, 150)
+        edge_density = float((edges[component_mask > 0] > 0).mean()) if area else 0
+        low_food_signal = saturation_mean < 0.16 and color_std < 0.20 and edge_density < 0.035
+        if low_food_signal:
+            return 0
+        score = (
+            saturation_mean * 0.34
+            + min(color_std, 1.0) * 0.20
+            + min(fill_ratio, 1.0) * 0.18
+            + centrality * 0.16
+            + min(edge_density * 7.0, 1.0) * 0.12
+            + min(value_mean, 1.0) * 0.05
+        )
+        return float(min(1.0, score))
 
     def _profile_from_color(self, crop: np.ndarray, index: int) -> FoodProfile:
         if crop.size == 0:
@@ -208,22 +461,30 @@ class FoodAnalyzer:
         confidence: float,
         frame_width: int,
         frame_height: int,
+        area_px: int | None = None,
     ) -> FoodTrack:
         x1, y1, x2, y2 = bbox
-        area_px = max(1, (x2 - x1) * (y2 - y1))
+        bbox_area_px = max(1, (x2 - x1) * (y2 - y1))
+        true_area_px = max(1, int(area_px or self._polygon_area(polygon) or bbox_area_px))
         frame_area = max(1, frame_width * frame_height)
-        plate_scale_ml = 1200
-        compactness = min(1.15, max(0.55, math.sqrt(area_px / frame_area) * 2.2))
-        volume_ml = round(max(18, area_px / frame_area * plate_scale_ml * compactness), 1)
+        area_ratio = min(0.36, true_area_px / frame_area)
+
+        # Use mask area as the 2D footprint. A square-root compactness term keeps
+        # small foods from collapsing to zero while preventing huge bboxes from
+        # becoming huge weights.
+        plate_scale_ml = 980
+        compactness = min(1.06, max(0.48, math.sqrt(area_ratio) * 2.05))
+        volume_ml = round(max(8, area_ratio * plate_scale_ml * compactness), 1)
         estimated_weight = round(volume_ml * profile.density_g_per_ml, 1)
-        relative_error = min(0.52, 0.14 + profile.density_std_g_per_ml / max(profile.density_g_per_ml, 0.1) + (1 - confidence) * 0.2)
-        weight_error = round(max(6, estimated_weight * relative_error), 1)
-        weight_confidence = round(max(0.25, min(0.9, confidence * (1 - relative_error * 0.35))), 2)
-        volume_confidence = round(max(0.22, min(0.88, confidence * 0.86)), 2)
+        relative_error = min(0.56, 0.18 + profile.density_std_g_per_ml / max(profile.density_g_per_ml, 0.1) + (1 - confidence) * 0.24)
+        weight_error = round(max(5, estimated_weight * relative_error), 1)
+        weight_confidence = round(max(0.2, min(0.88, confidence * (1 - relative_error * 0.32))), 2)
+        volume_confidence = round(max(0.2, min(0.86, confidence * 0.84)), 2)
         return FoodTrack(
             track_id=track_id,
             name=profile.display_name,
             category=profile.category,
+            profile_key=profile.key,
             bbox=bbox,
             polygon=polygon,
             mask_svg_path=self._polygon_path(polygon),
@@ -245,14 +506,14 @@ class FoodAnalyzer:
         contrast = min(1, stat.stddev[0] / 72)
         edges = grayscale.filter(ImageFilter.FIND_EDGES)
         blur_score = min(1, ImageStat.Stat(edges).mean[0] / 24)
-        food_area = sum(max(0, (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])) for f in tracks)
+        food_area = sum(self._polygon_area(food.polygon) or max(0, (food.bbox[2] - food.bbox[0]) * (food.bbox[3] - food.bbox[1])) for food in tracks)
         area_ratio = food_area / max(frame.width * frame.height, 1)
-        angle = min(0.88, 0.18 + elapsed_seconds / 26)
-        depth = min(0.82, 0.12 + elapsed_seconds / 32 + len(tracks) * 0.05)
-        stability = min(0.9, 0.35 + frame_count / 80 + len(tracks) * 0.08)
-        motion = min(0.86, 0.32 + elapsed_seconds / 30)
+        angle = min(0.88, 0.20 + elapsed_seconds / 26)
+        depth = min(0.82, 0.14 + elapsed_seconds / 30 + len(tracks) * 0.05)
+        stability = min(0.92, 0.28 + frame_count / 90 + len(tracks) * 0.07)
+        motion = min(0.88, 0.36 + elapsed_seconds / 30)
         lighting = max(0.15, min(0.95, 1 - abs(brightness - 0.58) * 1.35 + contrast * 0.16))
-        plate_visibility = max(0.0, min(0.94, area_ratio * 2.8))
+        plate_visibility = max(0.0, min(0.94, area_ratio * 4.1))
         blur = max(0.15, min(0.95, blur_score))
         overall = np.mean([angle, depth, stability, motion, lighting, plate_visibility, blur]).item()
         return MeasurementQuality(
@@ -269,48 +530,35 @@ class FoodAnalyzer:
     @staticmethod
     def _guidance(quality: MeasurementQuality, food_count: int) -> str:
         if food_count == 0:
-            return "未检测到稳定食物目标，请将餐盘或食物完整放入画面。"
+            return "未检测到稳定食物主体，请让食物占画面中心 1/3 到 2/3，避免拍到键盘、桌面或包装边缘。"
         if quality.lighting < 0.45:
             return "光照偏弱，请靠近光源或调整餐盘位置。"
-        if quality.angle_coverage < 0.55:
-            return "请缓慢向右移动手机，补充侧面视角。"
+        if quality.plate_visibility < 0.18:
+            return "食物主体太小，请稍微靠近餐盘。"
         if quality.depth_completeness < 0.62:
-            return "请稍微降低角度，获取食物高度信息。"
+            return "请缓慢改变角度继续采集，系统会用多帧结果修正重量。"
         if quality.mask_stability < 0.72:
-            return "请保持稳定 2 秒，等待分割结果收敛。"
-        return "采集质量良好，可以继续扫描或生成报告。"
+            return "请保持连续推流，等待分割和重量结果收敛。"
+        return "采集质量良好，继续缓慢移动手机可进一步降低估重误差。"
 
     @staticmethod
     def _smooth_mask(mask: np.ndarray) -> np.ndarray:
         uint_mask = mask.astype(np.uint8) * 255
-        kernel = np.ones((5, 5), dtype=np.uint8)
-        opened = cv2.morphologyEx(uint_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
+        kernel_open = np.ones((3, 3), dtype=np.uint8)
+        kernel_close = np.ones((5, 5), dtype=np.uint8)
+        opened = cv2.morphologyEx(uint_mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
+        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close, iterations=1)
         return closed > 0
 
     @staticmethod
-    def _connected_components(mask: np.ndarray, min_area: int) -> list[tuple[int, int, int, int, int]]:
-        labels_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
-        components: list[tuple[int, int, int, int, int]] = []
-        for label in range(1, labels_count):
-            x = int(stats[label, cv2.CC_STAT_LEFT])
-            y = int(stats[label, cv2.CC_STAT_TOP])
-            w = int(stats[label, cv2.CC_STAT_WIDTH])
-            h = int(stats[label, cv2.CC_STAT_HEIGHT])
-            area = int(stats[label, cv2.CC_STAT_AREA])
-            if area >= min_area:
-                components.append((x, y, x + w, y + h, area))
-        components.sort(key=lambda item: item[4], reverse=True)
-        return components[:8]
-
-    @staticmethod
-    def _food_likeness_score(arr: np.ndarray, mask: np.ndarray, components: list[tuple[int, int, int, int, int]]) -> float:
+    def _food_likeness_score(arr: np.ndarray, mask: np.ndarray, components: list[FoodComponent]) -> float:
         height, width = mask.shape
         frame_area = max(width * height, 1)
         mask_ratio = float(mask.mean())
-        component_area = sum(item[4] for item in components) / frame_area
+        component_area = sum(item.area_px for item in components) / frame_area
+        component_score = sum(item.score for item in components) / len(components) if components else 0
         channel_std = float(np.std(arr.reshape(-1, 3), axis=0).mean() / 80)
-        score = mask_ratio * 1.2 + component_area * 2.0 + channel_std * 0.18
+        score = mask_ratio * 0.7 + component_area * 1.45 + component_score * 0.42 + channel_std * 0.12
         return float(min(1.0, score))
 
     @staticmethod
@@ -329,7 +577,7 @@ class FoodAnalyzer:
         rectangular_count = 0
         min_area = max(60, int(width * height * 0.0008))
         max_area = int(width * height * 0.08)
-        for contour in contours[:240]:
+        for contour in contours[:260]:
             area = cv2.contourArea(contour)
             if area < min_area or area > max_area:
                 continue
@@ -344,12 +592,38 @@ class FoodAnalyzer:
         many_keyboard_shapes = rectangular_count >= 18 and line_count >= 60 and edge_density > 0.035
         mostly_dark_device = dark_ratio > 0.48 and low_saturation_ratio > 0.6 and rectangular_count >= 9
         black_keyboard_like = dark_ratio > 0.62 and line_count >= 120 and edge_density > 0.04
-        return many_keyboard_shapes or mostly_dark_device or black_keyboard_like
+        flat_office_scene = low_saturation_ratio > 0.78 and edge_density > 0.055 and rectangular_count >= 12
+        return many_keyboard_shapes or mostly_dark_device or black_keyboard_like or flat_office_scene
 
     @staticmethod
     def _bbox_polygon(bbox: list[int]) -> list[list[int]]:
         x1, y1, x2, y2 = bbox
         return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+
+    @staticmethod
+    def _contour_polygon(component_mask: np.ndarray, offset_x: int, offset_y: int) -> list[list[int]]:
+        contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return []
+        contour = max(contours, key=cv2.contourArea)
+        epsilon = max(2.0, cv2.arcLength(contour, True) * 0.018)
+        approx = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2)
+        points = [[int(x + offset_x), int(y + offset_y)] for x, y in approx]
+        return FoodAnalyzer._simplify_polygon(points)
+
+    @staticmethod
+    def _simplify_polygon(points: list[list[int]], max_points: int = 36) -> list[list[int]]:
+        if len(points) <= max_points:
+            return points
+        step = max(1, math.ceil(len(points) / max_points))
+        return points[::step][:max_points]
+
+    @staticmethod
+    def _polygon_area(polygon: list[list[int]]) -> int:
+        if len(polygon) < 3:
+            return 0
+        pts = np.array(polygon, dtype=np.float32)
+        return int(abs(cv2.contourArea(pts)))
 
     @staticmethod
     def _polygon_path(polygon: list[list[int]]) -> str:

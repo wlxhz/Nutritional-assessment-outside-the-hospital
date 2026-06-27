@@ -243,7 +243,8 @@ textarea {
 
 .video-stage {
   position: relative;
-  height: 560px;
+  height: min(62vh, 620px);
+  min-height: 480px;
   overflow: hidden;
   margin-top: 14px;
   border: 1px solid var(--line);
@@ -314,6 +315,14 @@ textarea {
   font-size: 28px;
 }
 
+.summary-metrics small {
+  display: block;
+  margin-top: 2px;
+  color: var(--amber);
+  font-size: 14px;
+  font-weight: 900;
+}
+
 .quality-bars {
   display: grid;
   gap: 12px;
@@ -354,7 +363,7 @@ textarea {
 
 table {
   width: 100%;
-  min-width: 1000px;
+  min-width: 1180px;
   border-collapse: collapse;
 }
 
@@ -373,6 +382,14 @@ th {
 
 td:first-child {
   font-weight: 900;
+}
+
+.lost-row {
+  opacity: 0.58;
+}
+
+td strong {
+  display: block;
 }
 
 pre {

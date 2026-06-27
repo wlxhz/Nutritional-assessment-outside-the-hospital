@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 SessionStatus = Literal[
@@ -63,6 +63,7 @@ class FoodTrack(BaseModel):
     track_id: str
     name: str
     category: str
+    profile_key: str = "unknown_food"
     state: str = "tracking"
     bbox: list[int]
     polygon: list[list[int]] = Field(default_factory=list)
@@ -75,6 +76,12 @@ class FoodTrack(BaseModel):
     estimated_weight_g: float
     weight_error_g: float
     weight_confidence: float
+    visible_frames: int = 1
+    sample_count: int = 1
+    stable_seconds: float = 0
+    convergence: float = 0
+    first_seen_seconds: float = 0
+    last_seen_seconds: float = 0
     nutrition: Nutrition
 
 
@@ -102,12 +109,15 @@ class Guidance(BaseModel):
 
 
 class SessionState(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     session_id: str
     status: SessionStatus
     created_at: datetime
     expires_at: datetime
     elapsed_seconds: float = 0
     frame_count: int = 0
+    analyzed_frame_count: int = 0
     analyzer: str = "not_loaded"
     model_name: str = "none"
     capture_url: str
