@@ -230,17 +230,54 @@ def _apply_health_thresholds(plan: dict[str, Any], previous: dict[str, Any]) -> 
     return result
 
 
+def _recipe_change_summary(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    before_by_meal = {recipe.get("mealType"): recipe for recipe in before or []}
+    changes: list[dict[str, Any]] = []
+    for recipe in after or []:
+        meal_type = recipe.get("mealType")
+        old_items = [str(item) for item in before_by_meal.get(meal_type, {}).get("items", [])]
+        new_items = [str(item) for item in recipe.get("items", [])]
+        removed = [item for item in old_items if item not in new_items]
+        added = [item for item in new_items if item not in old_items]
+        if added or removed:
+            changes.append(
+                {
+                    "mealType": meal_type,
+                    "name": recipe.get("name") or meal_type,
+                    "removed": removed,
+                    "added": added,
+                }
+            )
+    return changes
+
+
 def _adjusted_plan_from_agent(latest_plan: dict[str, Any] | None, plan_patch: dict[str, Any]) -> dict[str, Any] | None:
     if not latest_plan or not plan_patch:
         return None
     base_plan = latest_plan.get("plan") or {}
+    previous_daily = dict(base_plan.get("dailyGoal") or {})
     merged = _deep_merge(base_plan, plan_patch)
     merged = _apply_health_thresholds(merged, base_plan)
+    summary = plan_patch.get("adjustmentSummary") or _recipe_change_summary(
+        base_plan.get("recipes") or [],
+        merged.get("recipes") or [],
+    )
     notes = list(merged.get("demoNotes") or [])
     reason = plan_patch.get("adjustmentReason")
     if reason:
         notes.append(reason)
     merged["demoNotes"] = notes[-6:]
+    adjustment = {
+        "reason": reason or "",
+        "feedbackTags": plan_patch.get("feedbackTags") or [],
+        "summary": summary,
+        "previousDailyGoal": previous_daily,
+        "updatedDailyGoal": merged.get("dailyGoal") or {},
+    }
+    merged["latestAdjustment"] = adjustment
+    history = list(base_plan.get("adjustmentHistory") or [])
+    history.append(adjustment)
+    merged["adjustmentHistory"] = history[-5:]
     return merged
 
 

@@ -220,10 +220,20 @@ class MmyAiClient:
     def _fallback_agent_reply(user_message: str, context: dict[str, Any]) -> dict[str, Any]:
         text = user_message.strip()
         latest_plan = (context.get("latestPlan") or {}).get("plan") or {}
-        dislikes = [word for word in ("太甜", "太油", "吃不下", "不想吃鱼", "不吃鱼", "咸", "腻") if word in text]
+        normalized = text.replace("，", " ").replace("。", " ").strip()
+        has_cn = any("\u4e00" <= char <= "\u9fff" for char in normalized)
+        meaningful = has_cn and len(normalized) >= 3
+        if not meaningful:
+            return {
+                "content": "我还需要更具体一点的反馈，例如“晚餐太油”“不想吃鱼”“菜太淡不好吃”，这样才能安全调整食谱。",
+                "planPatch": {},
+                "safetyNotes": ["未识别到明确饮食反馈，本次不调整营养方案。"],
+            }
+        dislikes = [word for word in ("太甜", "太油", "吃不下", "不想吃鱼", "不吃鱼", "咸", "腻", "难吃", "不好吃", "没味道", "太淡", "单调") if word in text]
         content = "我已记录你的反馈，会在不突破健康阈值的范围内微调食谱。"
         patch: dict[str, Any] = {}
-        recipes = latest_plan.get("recipes") or []
+        recipes = [dict(recipe) for recipe in (latest_plan.get("recipes") or [])]
+        before_recipes = [dict(recipe) for recipe in recipes]
         if "不想吃鱼" in text or "不吃鱼" in text:
             recipes = replace_recipe_item(recipes, "清蒸鱼", "去皮鸡腿肉")
             content = "收到，后续把鱼类替换为去皮鸡腿肉、鸡蛋羹或豆腐，蛋白质目标保持不变。"
@@ -242,6 +252,10 @@ class MmyAiClient:
             if daily.get("energyKcal"):
                 daily["energyKcal"] = max(1300, int(round(float(daily["energyKcal"]) * 0.94)))
                 patch["dailyGoal"] = daily
+            recipes = make_recipes_smaller(recipes)
+        elif any(word in text for word in ("难吃", "不好吃", "没味道", "太淡", "单调")):
+            content = "收到，下一版会保留控糖和少油目标，但把菜品换成更有味道的酸香、菌菇和清炖组合。"
+            recipes = make_recipes_more_palatable(recipes)
         if recipes:
             targets = normalize_targets(patch.get("dailyGoal") or latest_plan.get("dailyGoal") or {})
             patch["recipes"] = recipes
@@ -249,6 +263,9 @@ class MmyAiClient:
         patch["adjustmentReason"] = f"Agent 根据用户反馈调整：{text[:60]}"
         if dislikes:
             patch["feedbackTags"] = dislikes
+        changes = describe_recipe_changes(before_recipes, recipes)
+        if changes:
+            patch["adjustmentSummary"] = changes
         return {"content": content, "planPatch": patch, "safetyNotes": ["调整幅度已限制在日常健康阈值内。"]}
 
 
@@ -347,6 +364,62 @@ def replace_recipe_item(recipes: list[dict[str, Any]], old: str, new: str) -> li
         item["items"] = [new if old in str(food) else food for food in item.get("items", [])]
         updated.append(item)
     return updated
+
+
+def make_recipes_more_palatable(recipes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    replacements = {
+        "清炒西兰花": "番茄烩西兰花",
+        "蒜蓉生菜": "香菇扒生菜",
+        "南瓜小米粥": "山药小米粥",
+        "无糖豆浆": "温热无糖豆浆",
+        "番茄菌菇汤": "紫菜虾皮菌菇汤",
+    }
+    updated: list[dict[str, Any]] = []
+    for recipe in recipes:
+        item = dict(recipe)
+        item["items"] = [replacements.get(str(food), food) for food in item.get("items", [])]
+        if item.get("mealType") == "lunch" and "凉拌黄瓜木耳" not in item["items"]:
+            item["items"].append("凉拌黄瓜木耳")
+        if item.get("mealType") == "dinner" and "醋汁番茄" not in item["items"]:
+            item["items"].append("醋汁番茄")
+        item["reason"] = "保留控糖少油原则，用酸香、菌菇和清淡调味提升入口感。"
+        updated.append(item)
+    return updated
+
+
+def make_recipes_smaller(recipes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    updated: list[dict[str, Any]] = []
+    for recipe in recipes:
+        item = dict(recipe)
+        if item.get("mealType") == "lunch":
+            item["items"] = ["杂粮饭小半碗", "鸡蛋豆腐羹", "番茄菌菇汤", "少量清炒时蔬"]
+            item["reason"] = "单餐体积下调，保留蛋白质和蔬菜，减少饱胀感。"
+        elif item.get("mealType") == "dinner":
+            item["items"] = ["山药小米粥半碗", "嫩豆腐", "焯青菜"]
+            item["reason"] = "晚餐改成软烂小份，降低胃肠负担。"
+        updated.append(item)
+    return updated
+
+
+def describe_recipe_changes(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    before_by_meal = {recipe.get("mealType"): recipe for recipe in before}
+    for recipe in after:
+        meal_type = recipe.get("mealType")
+        old_items = [str(item) for item in before_by_meal.get(meal_type, {}).get("items", [])]
+        new_items = [str(item) for item in recipe.get("items", [])]
+        removed = [item for item in old_items if item not in new_items]
+        added = [item for item in new_items if item not in old_items]
+        if added or removed:
+            changes.append(
+                {
+                    "mealType": meal_type,
+                    "name": recipe.get("name") or meal_type,
+                    "removed": removed,
+                    "added": added,
+                }
+            )
+    return changes
 
 
 def normalize_targets(raw: dict[str, Any]) -> dict[str, int]:

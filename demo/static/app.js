@@ -317,6 +317,72 @@ function toggleDiseaseOther() {
   if (!isOther) $("diseaseOtherText").value = "";
 }
 
+function diseaseLabel(value = "") {
+  return {
+    diabetes: "糖尿病",
+    hypertension: "高血压",
+    internal_postoperative_recovery: "内科术后康复",
+    tumor_recovery: "肿瘤康复",
+    other: "其他",
+  }[value] || value || "未填写";
+}
+
+function planBasisHtml(plan = {}) {
+  const notes = plan.demoNotes || [];
+  const profile = state.profile || {};
+  const basis = [
+    `病症：${diseaseLabel(profile.diseaseType)}${profile.diseaseOtherText ? `（${profile.diseaseOtherText}）` : ""}`,
+    `身体数据：${profile.age || "-"}岁 / ${profile.weight || "-"}kg / ${profile.height || "-"}cm`,
+    `饮食偏好：${profile.dietPreference || "未填写，按清淡均衡默认推荐"}`,
+  ];
+  return `
+    <div class="plan-basis">
+      ${basis.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+      ${notes.map((note) => `<span>${escapeHtml(note)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function adjustmentHtml(plan = {}) {
+  const adjustment = plan.latestAdjustment || {};
+  const summary = adjustment.summary || [];
+  const tags = adjustment.feedbackTags || [];
+  const previous = adjustment.previousDailyGoal || {};
+  const updated = adjustment.updatedDailyGoal || {};
+  const metricChanges = [
+    ["能量", "energyKcal", "kcal"],
+    ["蛋白质", "proteinG", "g"],
+    ["脂肪", "fatG", "g"],
+    ["碳水", "carbohydrateG", "g"],
+  ].filter(([, key]) => Number(previous[key] || 0) && Number(updated[key] || 0) && Number(previous[key]) !== Number(updated[key]));
+  if (!adjustment.reason && !summary.length && !metricChanges.length) return "";
+  return `
+    <div class="adjustment-card">
+      <div class="adjustment-head">
+        <strong>本次 Agent 调整</strong>
+        ${tags.length ? `<span>${tags.map((tag) => escapeHtml(tag)).join(" / ")}</span>` : ""}
+      </div>
+      ${adjustment.reason ? `<p>${escapeHtml(adjustment.reason)}</p>` : ""}
+      ${summary.length ? `
+        <div class="change-list">
+          ${summary.map((change) => `
+            <div>
+              <b>${escapeHtml(mealNames[change.mealType] || change.name || change.mealType)}</b>
+              ${change.removed?.length ? `<span>移除：${change.removed.map((item) => escapeHtml(item)).join("、")}</span>` : ""}
+              ${change.added?.length ? `<span>新增：${change.added.map((item) => escapeHtml(item)).join("、")}</span>` : ""}
+            </div>
+          `).join("")}
+        </div>
+      ` : ""}
+      ${metricChanges.length ? `
+        <div class="target-diff">
+          ${metricChanges.map(([label, key, unit]) => `<span>${label} ${Math.round(previous[key])}${unit} → ${Math.round(updated[key])}${unit}</span>`).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
 function renderPlan() {
   const plan = state.plan?.plan || {};
   const daily = plan.dailyGoal || {};
@@ -330,7 +396,8 @@ function renderPlan() {
       <div class="metric"><span>脂肪</span><strong>${daily.fatG || 0} g</strong></div>
       <div class="metric"><span>碳水</span><strong>${daily.carbohydrateG || 0} g</strong></div>
     </div>
-    ${(plan.demoNotes || []).map((note) => `<small>${escapeHtml(note)}</small>`).join("")}
+    ${planBasisHtml(plan)}
+    ${adjustmentHtml(plan)}
   `;
   const meals = plan.mealBreakdown || [];
   const recipesByMeal = Object.fromEntries((plan.recipes || []).map((recipe) => [recipe.mealType, recipe]));

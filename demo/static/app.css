@@ -860,6 +860,86 @@ h3 {
   font-size: 20px;
 }
 
+.plan-basis {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.plan-basis span {
+  padding-left: 10px;
+  border-left: 3px solid rgba(127, 157, 118, 0.42);
+}
+
+.adjustment-card {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 2px solid rgba(127, 157, 118, 0.36);
+  border-radius: 8px;
+  background: #f7fbef;
+}
+
+.adjustment-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.adjustment-head strong {
+  color: var(--leaf-strong);
+  font-size: 14px;
+}
+
+.adjustment-head span,
+.adjustment-card p,
+.change-list span,
+.target-diff span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.adjustment-card p {
+  margin: 0;
+}
+
+.change-list {
+  display: grid;
+  gap: 8px;
+}
+
+.change-list div {
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 253, 248, 0.78);
+}
+
+.change-list b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.target-diff {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.target-diff span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #fff8ec;
+  font-weight: 900;
+}
+
 .meal-tabs {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
