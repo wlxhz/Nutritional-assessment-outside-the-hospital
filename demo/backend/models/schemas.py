@@ -64,6 +64,9 @@ class FoodTrack(BaseModel):
     name: str
     category: str
     profile_key: str = "unknown_food"
+    cooking_method: str = "unknown"
+    cooking_method_name: str = "未识别"
+    cooking_confidence: float = 0
     state: str = "tracking"
     bbox: list[int]
     polygon: list[list[int]] = Field(default_factory=list)

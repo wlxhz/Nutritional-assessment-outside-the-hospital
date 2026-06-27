@@ -20,6 +20,16 @@ class FoodProfile:
     sodium_mg_per_100g: float = 0
 
 
+@dataclass(frozen=True)
+class CookingAdjustment:
+    key: str
+    display_name: str
+    calories_delta_per_100g: float = 0
+    fat_delta_per_100g: float = 0
+    carbs_delta_per_100g: float = 0
+    sodium_delta_per_100g: float = 0
+
+
 def f(
     key: str,
     name: str,
@@ -34,6 +44,18 @@ def f(
     sodium: float = 0,
 ) -> FoodProfile:
     return FoodProfile(key, name, category, density, density_std, kcal, protein, carbs, fat, fiber, sodium)
+
+
+COOKING_METHODS: dict[str, CookingAdjustment] = {
+    "unknown": CookingAdjustment("unknown", "未识别"),
+    "raw_light": CookingAdjustment("raw_light", "少油/原味"),
+    "boiled_steamed": CookingAdjustment("boiled_steamed", "水煮/清蒸"),
+    "stir_fried": CookingAdjustment("stir_fried", "炒制", calories_delta_per_100g=65, fat_delta_per_100g=6, sodium_delta_per_100g=120),
+    "pan_fried": CookingAdjustment("pan_fried", "煎制", calories_delta_per_100g=95, fat_delta_per_100g=8, sodium_delta_per_100g=140),
+    "deep_fried": CookingAdjustment("deep_fried", "炸制", calories_delta_per_100g=120, fat_delta_per_100g=10, carbs_delta_per_100g=7, sodium_delta_per_100g=180),
+    "braised": CookingAdjustment("braised", "红烧/卤制", calories_delta_per_100g=45, fat_delta_per_100g=3, carbs_delta_per_100g=3, sodium_delta_per_100g=220),
+    "roasted": CookingAdjustment("roasted", "烤制", calories_delta_per_100g=35, fat_delta_per_100g=2, sodium_delta_per_100g=90),
+}
 
 
 # Approximate per-100g values for demo validation. They are normalized for this
@@ -120,13 +142,18 @@ def all_profiles() -> list[dict[str, object]]:
     return [asdict(profile) for profile in FOOD_PROFILES.values()]
 
 
-def nutrition_for_weight(profile: FoodProfile, weight_g: float) -> Nutrition:
+def cooking_method_for_key(key: str) -> CookingAdjustment:
+    return COOKING_METHODS.get(key, COOKING_METHODS["unknown"])
+
+
+def nutrition_for_weight(profile: FoodProfile, weight_g: float, cooking_method: str = "unknown") -> Nutrition:
     factor = max(weight_g, 0) / 100
+    adjustment = cooking_method_for_key(cooking_method)
     return Nutrition(
-        calories_kcal=round(profile.calories_kcal_per_100g * factor, 1),
+        calories_kcal=round((profile.calories_kcal_per_100g + adjustment.calories_delta_per_100g) * factor, 1),
         protein_g=round(profile.protein_g_per_100g * factor, 1),
-        carbs_g=round(profile.carbs_g_per_100g * factor, 1),
-        fat_g=round(profile.fat_g_per_100g * factor, 1),
+        carbs_g=round((profile.carbs_g_per_100g + adjustment.carbs_delta_per_100g) * factor, 1),
+        fat_g=round((profile.fat_g_per_100g + adjustment.fat_delta_per_100g) * factor, 1),
         fiber_g=round(profile.fiber_g_per_100g * factor, 1),
-        sodium_mg=round(profile.sodium_mg_per_100g * factor, 1),
+        sodium_mg=round((profile.sodium_mg_per_100g + adjustment.sodium_delta_per_100g) * factor, 1),
     )

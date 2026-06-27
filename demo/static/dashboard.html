@@ -43,15 +43,15 @@
           <ul class="connection-list">
             <li><b></b>Android 浏览器 getUserMedia 授权</li>
             <li><b></b>Canvas 连续抽帧 JPEG 上传</li>
-            <li><b></b>FastAPI 后台分析 + WebSocket 推送</li>
-            <li><b></b>多帧聚合：时间越长误差越小</li>
+            <li><b></b>主体优先识别，过滤包装纸/桌面/碎屑</li>
+            <li><b></b>识别烹饪方式并修正热量与脂肪</li>
           </ul>
         </aside>
 
         <section class="panel video-panel">
           <div class="panel-head">
             <div>
-              <h2>实时视频与分割</h2>
+              <h2>实时视频与主体分割</h2>
               <p id="videoMeta">等待手机推流</p>
             </div>
             <span id="analyzerLabel" class="model-label">Analyzer: -</span>
@@ -93,23 +93,21 @@
 
         <section class="panel table-panel">
           <div class="panel-head">
-            <h2>食物 Track</h2>
+            <h2>主体识别结果</h2>
             <span id="frameCount">0 frames</span>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>食物</th>
-                  <th>track_id</th>
+                  <th>主体</th>
+                  <th>烹饪方式</th>
                   <th>克重</th>
-                  <th>体积</th>
                   <th>热量</th>
                   <th>蛋白质</th>
                   <th>碳水</th>
                   <th>脂肪</th>
                   <th>稳定帧</th>
-                  <th>稳定时长</th>
                   <th>收敛度</th>
                   <th>置信度</th>
                 </tr>

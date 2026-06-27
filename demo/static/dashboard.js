@@ -10,11 +10,11 @@ const state = {
 const qualityLabels = [
   ["angle_coverage", "视角覆盖"],
   ["depth_completeness", "深度完整度"],
-  ["mask_stability", "分割稳定性"],
+  ["mask_stability", "主体稳定性"],
   ["motion_quality", "连续采集"],
   ["lighting", "光照质量"],
   ["blur", "清晰度"],
-  ["plate_visibility", "食物可见"],
+  ["plate_visibility", "主体可见"],
 ];
 
 qs("#createSessionBtn").addEventListener("click", createSession);
@@ -106,41 +106,30 @@ function renderOverlay(nextState) {
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", food.mask_svg_path || `M ${x1} ${y1} L ${x2} ${y1} L ${x2} ${y2} L ${x1} ${y2} Z`);
     path.setAttribute("fill", food.color);
-    path.setAttribute("fill-opacity", food.state === "lost" ? "0.06" : "0.12");
+    path.setAttribute("fill-opacity", food.state === "lost" ? "0.05" : "0.1");
     path.setAttribute("stroke", food.color);
     path.setAttribute("stroke-width", "3");
     path.setAttribute("stroke-linejoin", "round");
     svg.appendChild(path);
 
-    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    rect.setAttribute("x", x1);
-    rect.setAttribute("y", y1);
-    rect.setAttribute("width", x2 - x1);
-    rect.setAttribute("height", y2 - y1);
-    rect.setAttribute("fill", "none");
-    rect.setAttribute("stroke", food.color);
-    rect.setAttribute("stroke-width", "2");
-    rect.setAttribute("stroke-dasharray", food.state === "lost" ? "8 8" : "0");
-    svg.appendChild(rect);
-
-    const labelX = Math.max(6, Math.min(width - 220, x1));
-    const labelY = Math.max(28, y1 - 10);
+    const labelX = Math.max(6, Math.min(width - 250, x1));
+    const labelY = Math.max(32, y1 - 10);
     const labelBg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
     labelBg.setAttribute("x", labelX);
-    labelBg.setAttribute("y", labelY - 24);
-    labelBg.setAttribute("width", "210");
-    labelBg.setAttribute("height", "28");
+    labelBg.setAttribute("y", labelY - 28);
+    labelBg.setAttribute("width", "244");
+    labelBg.setAttribute("height", "32");
     labelBg.setAttribute("rx", "4");
-    labelBg.setAttribute("fill", "rgba(7, 12, 9, 0.82)");
+    labelBg.setAttribute("fill", "rgba(7, 12, 9, 0.86)");
     labelBg.setAttribute("stroke", food.color);
     labelBg.setAttribute("stroke-width", "1");
     svg.appendChild(labelBg);
 
     const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
     label.setAttribute("x", labelX + 8);
-    label.setAttribute("y", labelY - 6);
+    label.setAttribute("y", labelY - 8);
     label.setAttribute("fill", "#f7fff9");
-    label.setAttribute("font-size", "16");
+    label.setAttribute("font-size", "15");
     label.setAttribute("font-weight", "800");
     label.textContent = `${food.name} ${Math.round(food.estimated_weight_g)}±${Math.round(food.weight_error_g)}g`;
     svg.appendChild(label);
@@ -150,16 +139,14 @@ function renderOverlay(nextState) {
 function renderFoods(foods) {
   qs("#foodRows").innerHTML = foods.map((food) => `
     <tr class="${food.state === "lost" ? "lost-row" : ""}">
-      <td>${food.name}<small>${food.category} · ${food.state === "lost" ? "短暂丢失" : "跟踪中"}</small></td>
-      <td>${food.track_id}</td>
+      <td>${food.name}<small>${food.category} · ${food.state === "lost" ? "短暂丢失" : "主体跟踪"}</small></td>
+      <td>${food.cooking_method_name || "未识别"}<small>${Math.round((food.cooking_confidence || 0) * 100)}%</small></td>
       <td><strong>${food.estimated_weight_g}g</strong><small>±${food.weight_error_g}g</small></td>
-      <td>${food.volume_ml}ml</td>
       <td>${food.nutrition.calories_kcal}kcal</td>
       <td>${food.nutrition.protein_g}g</td>
       <td>${food.nutrition.carbs_g}g</td>
       <td>${food.nutrition.fat_g}g</td>
       <td>${food.sample_count || food.visible_frames || 1}</td>
-      <td>${(food.stable_seconds || 0).toFixed(1)}s</td>
       <td>${Math.round((food.convergence || 0) * 100)}%</td>
       <td>${Math.round(food.weight_confidence * 100)}%</td>
     </tr>

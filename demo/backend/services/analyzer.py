@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageStat
 
 from backend.models.schemas import FoodTrack, MeasurementQuality
-from backend.services.nutrition import FoodProfile, nutrition_for_weight, profile_for_key
+from backend.services.nutrition import FoodProfile, cooking_method_for_key, nutrition_for_weight, profile_for_key
 
 
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models"
@@ -33,6 +33,8 @@ class FoodComponent:
     polygon: list[list[int]]
     score: float
     crop: np.ndarray
+    cooking_method: str = "unknown"
+    cooking_confidence: float = 0
 
 
 class FoodAnalyzer:
@@ -109,6 +111,12 @@ class FoodAnalyzer:
             profile = self._profile_from_label(raw_label, idx)
             polygon = polygons[idx] if idx < len(polygons) and polygons[idx] else self._bbox_polygon(bbox)
             area_px = max(1, self._polygon_area(polygon) or (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+            crop = np.array(frame.image)[bbox[1] : bbox[3], bbox[0] : bbox[2]]
+            cooking_method, cooking_confidence = (
+                self._cooking_method_from_region(crop, np.ones(crop.shape[:2], dtype=np.uint8) * 255)
+                if crop.size
+                else ("unknown", 0)
+            )
             tracks.append(
                 self._track_from_region(
                     f"food_{idx + 1}",
@@ -119,6 +127,8 @@ class FoodAnalyzer:
                     frame.width,
                     frame.height,
                     area_px=area_px,
+                    cooking_method=cooking_method,
+                    cooking_confidence=cooking_confidence,
                 )
             )
         return tracks[:6]
@@ -150,6 +160,9 @@ class FoodAnalyzer:
             return []
 
         mask = self._food_candidate_mask(arr)
+        fried_subject_mask = self._fried_subject_mask(arr)
+        if fried_subject_mask.mean() > 0.035:
+            mask = fried_subject_mask
         components = self._food_components(arr, mask, min_area=max(300, int(width * height * 0.0035)))
         if not components:
             return []
@@ -158,9 +171,15 @@ class FoodAnalyzer:
         if food_score < 0.18:
             return []
 
+        subject_components = self._select_subject_components(components, width, height)
+        if not subject_components:
+            return []
+
         tracks: list[FoodTrack] = []
-        for idx, component in enumerate(components[:6]):
+        for idx, component in enumerate(subject_components[:4]):
             profile = self._profile_from_color(component.crop, idx)
+            if component.cooking_method == "deep_fried" and profile.key in {"rice", "sweet_potato", "carrot", "potato"}:
+                profile = profile_for_key("chicken")
             area_score = component.area_px / max(width * height, 1)
             confidence = min(0.9, 0.36 + food_score * 0.34 + component.score * 0.22 + area_score * 1.1 + frame_count * 0.0015)
             if confidence < 0.38:
@@ -175,6 +194,8 @@ class FoodAnalyzer:
                     width,
                     height,
                     area_px=component.area_px,
+                    cooking_method=component.cooking_method,
+                    cooking_confidence=component.cooking_confidence,
                 )
             )
         return tracks
@@ -202,6 +223,23 @@ class FoodAnalyzer:
         mask = mask & ~very_low_texture & ~overexposed
         mask = FoodAnalyzer._smooth_mask(mask)
         return FoodAnalyzer._shrink_overfull_mask(arr, mask)
+
+    @staticmethod
+    def _fried_subject_mask(arr: np.ndarray) -> np.ndarray:
+        hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+        hue = hsv[:, :, 0]
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F))
+        edges = cv2.Canny(gray, 60, 140)
+        golden = (hue >= 3) & (hue <= 30) & (saturation > 115) & (value > 45)
+        textured = (lap > 4.5) | (edges > 0)
+        mask = golden & textured
+        kernel = np.ones((7, 7), dtype=np.uint8)
+        closed = cv2.morphologyEx(mask.astype(np.uint8) * 255, cv2.MORPH_CLOSE, kernel, iterations=2)
+        opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8), iterations=1)
+        return opened > 0
 
     @staticmethod
     def _shrink_overfull_mask(arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -288,9 +326,62 @@ class FoodAnalyzer:
             if score < 0.34:
                 continue
             polygon = self._contour_polygon(component_mask, x, y) or self._bbox_polygon(bbox)
-            components.append(FoodComponent(bbox=bbox, area_px=area, polygon=polygon, score=score, crop=crop))
+            cooking_method, cooking_confidence = self._cooking_method_from_region(crop, component_mask)
+            components.append(
+                FoodComponent(
+                    bbox=bbox,
+                    area_px=area,
+                    polygon=polygon,
+                    score=score,
+                    crop=crop,
+                    cooking_method=cooking_method,
+                    cooking_confidence=cooking_confidence,
+                )
+            )
         components.sort(key=lambda item: (item.score, item.area_px / frame_area), reverse=True)
         return components[:8]
+
+    @staticmethod
+    def _select_subject_components(components: list[FoodComponent], frame_width: int, frame_height: int) -> list[FoodComponent]:
+        if not components:
+            return []
+        frame_area = max(1, frame_width * frame_height)
+        ranked: list[tuple[float, FoodComponent]] = []
+        for component in components:
+            x1, y1, x2, y2 = component.bbox
+            width = max(1, x2 - x1)
+            height = max(1, y2 - y1)
+            area_ratio = component.area_px / frame_area
+            bbox_ratio = width * height / frame_area
+            center_x = (x1 + x2) / 2 / max(frame_width, 1)
+            center_y = (y1 + y2) / 2 / max(frame_height, 1)
+            center_distance = math.hypot(center_x - 0.5, center_y - 0.5)
+            centrality = max(0.0, 1.0 - center_distance * 1.55)
+            mean_brightness = float(component.crop.mean() / 255) if component.crop.size else 0
+            touches_right = x2 >= frame_width - 3
+            touches_bottom = y2 >= frame_height - 3
+            border_penalty = 0.28 if touches_right and touches_bottom else 0.12 if touches_right or touches_bottom else 0
+            too_small = area_ratio < 0.018 and bbox_ratio < 0.045
+            likely_wrapper_or_table = mean_brightness > 0.72 and component.cooking_method not in {"deep_fried", "stir_fried", "pan_fried"}
+            likely_table = touches_right and touches_bottom and center_y > 0.68 and component.cooking_method == "deep_fried"
+            if too_small or likely_wrapper_or_table:
+                continue
+            if likely_table:
+                continue
+            subject_score = component.score * 0.45 + min(area_ratio / 0.16, 1.0) * 0.34 + centrality * 0.16 + component.cooking_confidence * 0.05 - border_penalty
+            ranked.append((subject_score, component))
+
+        if not ranked:
+            return []
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        best_score = ranked[0][0]
+        best_area = ranked[0][1].area_px
+        selected_components: list[FoodComponent] = []
+        for score, component in ranked:
+            area_ratio_to_best = component.area_px / max(best_area, 1)
+            if score >= max(0.42, best_score * 0.64) and area_ratio_to_best >= 0.16:
+                selected_components.append(component)
+        return selected_components[:3]
 
     @staticmethod
     def _refine_oversized_component(
@@ -378,7 +469,7 @@ class FoodAnalyzer:
         touches = sum([x1 <= 2, y1 <= 2, x2 >= frame_width - 2, y2 >= frame_height - 2])
         if area_ratio > 0.36 or bbox_ratio > 0.52:
             return True
-        if width / max(frame_width, 1) > 0.86 or height / max(frame_height, 1) > 0.86:
+        if (width / max(frame_width, 1) > 0.94 or height / max(frame_height, 1) > 0.94) and touches >= 1:
             return True
         if touches >= 2 and bbox_ratio > 0.24:
             return True
@@ -452,6 +543,39 @@ class FoodAnalyzer:
             return profile_for_key("wood_ear")
         return profile_for_key(["rice", "chicken", "broccoli", "egg", "tofu", "pork_lean", "potato"][index % 7])
 
+    @staticmethod
+    def _cooking_method_from_region(crop: np.ndarray, component_mask: np.ndarray) -> tuple[str, float]:
+        if crop.size == 0:
+            return "unknown", 0
+        selected = crop[component_mask > 0]
+        if selected.size == 0:
+            return "unknown", 0
+        hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+        selected_hsv = hsv[component_mask > 0]
+        hue = selected_hsv[:, 0]
+        saturation = selected_hsv[:, 1]
+        value = selected_hsv[:, 2]
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F))
+        texture = float(np.percentile(lap[component_mask > 0], 82) / 28)
+        golden = ((hue >= 5) & (hue <= 28) & (saturation > 95) & (value > 70)).mean()
+        brown = ((hue >= 0) & (hue <= 24) & (saturation > 75) & (value > 45) & (value < 190)).mean()
+        green = ((hue >= 35) & (hue <= 95) & (saturation > 55)).mean()
+        pale = ((saturation < 65) & (value > 145)).mean()
+        red_sauce = (((hue <= 8) | (hue >= 170)) & (saturation > 75)).mean()
+
+        fried_score = min(1.0, golden * 0.85 + brown * 0.45 + min(texture, 1.0) * 0.28)
+        stir_score = min(1.0, (green + red_sauce) * 0.55 + float(saturation.mean() / 255) * 0.22 + min(texture, 1.0) * 0.12)
+        boiled_score = min(1.0, pale * 0.55 + max(0, 0.42 - float(saturation.mean() / 255)) * 0.55)
+
+        if fried_score >= 0.48 and fried_score >= stir_score:
+            return "deep_fried", round(max(0.58, fried_score), 2)
+        if stir_score >= 0.42 and stir_score >= boiled_score:
+            return "stir_fried", round(max(0.5, stir_score), 2)
+        if boiled_score >= 0.38:
+            return "boiled_steamed", round(max(0.48, boiled_score), 2)
+        return "raw_light", 0.42
+
     def _track_from_region(
         self,
         track_id: str,
@@ -462,6 +586,8 @@ class FoodAnalyzer:
         frame_width: int,
         frame_height: int,
         area_px: int | None = None,
+        cooking_method: str = "unknown",
+        cooking_confidence: float = 0,
     ) -> FoodTrack:
         x1, y1, x2, y2 = bbox
         bbox_area_px = max(1, (x2 - x1) * (y2 - y1))
@@ -480,11 +606,16 @@ class FoodAnalyzer:
         weight_error = round(max(5, estimated_weight * relative_error), 1)
         weight_confidence = round(max(0.2, min(0.88, confidence * (1 - relative_error * 0.32))), 2)
         volume_confidence = round(max(0.2, min(0.86, confidence * 0.84)), 2)
+        cooking = cooking_method_for_key(cooking_method)
+        display_name = f"{cooking.display_name}{profile.display_name}" if cooking_method not in {"unknown", "raw_light"} else profile.display_name
         return FoodTrack(
             track_id=track_id,
-            name=profile.display_name,
+            name=display_name,
             category=profile.category,
             profile_key=profile.key,
+            cooking_method=cooking_method,
+            cooking_method_name=cooking.display_name,
+            cooking_confidence=round(cooking_confidence, 2),
             bbox=bbox,
             polygon=polygon,
             mask_svg_path=self._polygon_path(polygon),
@@ -496,7 +627,7 @@ class FoodAnalyzer:
             estimated_weight_g=estimated_weight,
             weight_error_g=weight_error,
             weight_confidence=weight_confidence,
-            nutrition=nutrition_for_weight(profile, estimated_weight),
+            nutrition=nutrition_for_weight(profile, estimated_weight, cooking_method),
         )
 
     def _quality(self, frame: DecodedFrame, tracks: list[FoodTrack], frame_count: int, elapsed_seconds: float) -> MeasurementQuality:
@@ -538,7 +669,7 @@ class FoodAnalyzer:
         if quality.depth_completeness < 0.62:
             return "请缓慢改变角度继续采集，系统会用多帧结果修正重量。"
         if quality.mask_stability < 0.72:
-            return "请保持连续推流，等待分割和重量结果收敛。"
+            return "请保持连续推流，等待主体分割和重量结果收敛。"
         return "采集质量良好，继续缓慢移动手机可进一步降低估重误差。"
 
     @staticmethod

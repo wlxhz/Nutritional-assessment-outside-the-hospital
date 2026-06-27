@@ -23,7 +23,7 @@ from backend.models.schemas import (
     VideoInfo,
 )
 from backend.services.analyzer import DecodedFrame, FoodAnalyzer
-from backend.services.nutrition import nutrition_for_weight, profile_for_key
+from backend.services.nutrition import cooking_method_for_key, nutrition_for_weight, profile_for_key
 
 
 CHINA_TZ = timezone(timedelta(hours=8))
@@ -132,7 +132,7 @@ class SessionStore:
             record.state.guidance = Guidance(message="摄像头已授权，请开始连续推流。", needed_action="start_stream")
         elif event.event == "stream_started":
             record.state.status = "streaming"
-            record.state.guidance = Guidance(message="正在接收手机视频帧，请缓慢移动手机，系统会持续修正估重。", needed_action="scan_plate")
+            record.state.guidance = Guidance(message="正在接收手机视频帧，请缓慢移动手机，系统会持续修正主体克重。", needed_action="scan_plate")
         elif event.event == "stream_stopped":
             record.state.status = "mobile_connected"
             record.state.guidance = Guidance(message="采集已暂停，可重新开始推流。", needed_action="start_stream")
@@ -243,8 +243,9 @@ class SessionStore:
                 aggregate.track.weight_confidence = round(max(0.12, aggregate.track.weight_confidence * 0.92), 2)
 
         tracks = [aggregate.track for aggregate in record.track_memory.values() if aggregate.missed_frames <= 6]
-        tracks.sort(key=lambda item: (item.state != "tracking", -item.weight_confidence, item.track_id))
-        return tracks[:6]
+        tracks = self._filter_subject_tracks(tracks)
+        tracks.sort(key=lambda item: (item.state != "tracking", -item.weight_confidence, -item.estimated_weight_g, item.track_id))
+        return tracks[:4]
 
     def _smooth_track(
         self,
@@ -265,11 +266,16 @@ class SessionStore:
         bbox = [round(self._ema(a, b, alpha)) for a, b in zip(previous.bbox, detection.bbox)]
 
         profile = profile_for_key(detection.profile_key or previous.profile_key)
+        cooking_method = self._stable_cooking_method(previous, detection)
+        cooking = cooking_method_for_key(cooking_method)
         updated = detection.model_copy(deep=True)
         updated.track_id = aggregate.track_id
-        updated.name = profile.display_name
+        updated.name = f"{cooking.display_name}{profile.display_name}" if cooking_method not in {"unknown", "raw_light"} else profile.display_name
         updated.category = profile.category
         updated.profile_key = profile.key
+        updated.cooking_method = cooking_method
+        updated.cooking_method_name = cooking.display_name
+        updated.cooking_confidence = round(max(previous.cooking_confidence * 0.92, detection.cooking_confidence), 2)
         updated.state = "tracking"
         updated.bbox = [int(v) for v in bbox]
         updated.polygon = detection.polygon or previous.polygon
@@ -287,8 +293,36 @@ class SessionStore:
         updated.convergence = self._convergence(sample_count, stable_seconds)
         updated.first_seen_seconds = round(aggregate.first_seen_seconds, 1)
         updated.last_seen_seconds = round(elapsed_seconds, 1)
-        updated.nutrition = nutrition_for_weight(profile, updated.estimated_weight_g)
+        updated.nutrition = nutrition_for_weight(profile, updated.estimated_weight_g, cooking_method)
         return updated
+
+    @staticmethod
+    def _stable_cooking_method(previous: FoodTrack, detection: FoodTrack) -> str:
+        if detection.cooking_confidence >= 0.52:
+            return detection.cooking_method
+        if previous.cooking_confidence >= 0.45:
+            return previous.cooking_method
+        return detection.cooking_method or previous.cooking_method or "unknown"
+
+    @staticmethod
+    def _filter_subject_tracks(tracks: list[FoodTrack]) -> list[FoodTrack]:
+        if not tracks:
+            return []
+        active = [track for track in tracks if track.state == "tracking"]
+        reference = active or tracks
+        max_weight = max(track.estimated_weight_g for track in reference) if reference else 0
+        filtered: list[FoodTrack] = []
+        for track in tracks:
+            relative_weight = track.estimated_weight_g / max(max_weight, 1)
+            stable_enough = track.sample_count >= 3 or track.stable_seconds >= 1.2
+            meaningful_size = track.estimated_weight_g >= max(12, max_weight * 0.16)
+            if track.state == "lost" and (track.sample_count < 8 or relative_weight < 0.28):
+                continue
+            if not stable_enough and relative_weight < 0.5:
+                continue
+            if meaningful_size or track.cooking_method == "deep_fried":
+                filtered.append(track)
+        return filtered[:4]
 
     @staticmethod
     def _best_match(memory: dict[str, TrackAggregate], detection: FoodTrack, already_matched: set[str]) -> str | None:
@@ -353,12 +387,14 @@ class SessionStore:
     def _temporal_guidance(foods: list[FoodTrack], fallback: str) -> str:
         avg_convergence = sum(food.convergence for food in foods) / len(foods)
         avg_error_ratio = sum(food.weight_error_g / max(food.estimated_weight_g, 1) for food in foods) / len(foods)
+        methods = [food.cooking_method_name for food in foods if food.cooking_method not in {"unknown", "raw_light"}]
+        method_tip = f"，已识别烹饪方式：{'、'.join(sorted(set(methods)))}" if methods else ""
         if avg_convergence < 0.28:
-            return "已识别食物，正在积累视频帧；请保持连续推流，缓慢绕餐盘移动 5-10 秒。"
+            return f"已识别食物主体{method_tip}，正在积累视频帧；请保持连续推流，缓慢绕餐盘移动 5-10 秒。"
         if avg_error_ratio > 0.28:
-            return "重量误差仍偏大，请继续采集不同角度，系统会用多帧结果继续收敛。"
+            return f"主体重量误差仍偏大{method_tip}，请继续采集不同角度，系统会用多帧结果继续收敛。"
         if avg_convergence >= 0.72:
-            return "结果已较稳定，可继续采集以微调，或生成报告。"
+            return f"主体结果已较稳定{method_tip}，可继续采集以微调，或生成报告。"
         return fallback
 
     async def finish(self, session_id: str) -> Report:
@@ -375,6 +411,9 @@ class SessionStore:
                     "track_id": food.track_id,
                     "name": food.name,
                     "category": food.category,
+                    "cooking_method": food.cooking_method,
+                    "cooking_method_name": food.cooking_method_name,
+                    "cooking_confidence": food.cooking_confidence,
                     "weight_g": food.estimated_weight_g,
                     "weight_error_g": food.weight_error_g,
                     "volume_ml": food.volume_ml,
@@ -447,7 +486,7 @@ class SessionStore:
         if state.measurement_quality.angle_coverage < 0.6:
             warnings.append("视角覆盖不足，请补充侧面视角以提高估重稳定性。")
         if state.foods and sum(food.convergence for food in state.foods) / len(state.foods) < 0.5:
-            warnings.append("采集时间较短，建议继续推流 5-10 秒让结果收敛。")
+            warnings.append("采集时间较短，建议继续推流 5-10 秒让主体结果收敛。")
         if not warnings:
             warnings.append("第一版估重仅用于产品验证，不能替代精密称重。")
         return warnings
