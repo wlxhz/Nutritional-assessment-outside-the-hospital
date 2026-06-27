@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
 from io import BytesIO
 import os
 from pathlib import Path
 import socket
 from typing import Any
+from urllib.parse import quote
 
 import qrcode
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
@@ -18,13 +20,20 @@ from backend.services.mmy_ai import AiConfig, MmyAiClient, load_env_file
 from backend.services.mmy_parser import LocalPrescriptionParser
 from backend.services.mmy_store import MmyStore, default_db_path
 from backend.services.nutrition import FOOD_PROFILES, all_profiles
-from backend.services.session_store import SessionStore
+from backend.services.session_store import CHINA_TZ, SessionStore
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = BASE_DIR / "static"
 PROJECT_DIR = BASE_DIR.parent
-load_env_file(PROJECT_DIR / ".env")
+REPO_DIR = PROJECT_DIR.parent
+ENV_SOURCES = [
+    REPO_DIR / ".env",
+    REPO_DIR / ".env.example",
+    PROJECT_DIR / ".env",
+    PROJECT_DIR / ".env.example",
+]
+LOADED_ENV_FILES = [str(path) for path in ENV_SOURCES if load_env_file(path)]
 
 analyzer = FoodAnalyzer()
 store = SessionStore(analyzer)
@@ -157,6 +166,150 @@ def _adjustment_for_items(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _vision_compliance_for_food(food: dict[str, Any]) -> str:
+    profile_key = str(food.get("profile_key") or "")
+    name = str(food.get("name") or "")
+    category = str(food.get("category") or "")
+    cooking_method = str(food.get("cooking_method") or "")
+    confidence = float(food.get("confidence") or 0)
+    calories = float(food.get("calories_kcal") or 0)
+    weight = float(food.get("weight_g") or 0)
+    calories_per_100g = calories / max(weight, 1) * 100
+
+    risky_words = ("高糖", "甜点", "蛋糕", "奶茶", "糖", "炸", "油炸", "肥肉")
+    if (
+        profile_key == "pork_floss_pastry"
+        or name == "肉松糕点"
+        or cooking_method == "deep_fried"
+        or category in {"甜点", "零食"}
+        or calories_per_100g >= 320
+        or any(word in name for word in risky_words)
+    ):
+        return "non_compliant"
+    if confidence < 0.62 or calories_per_100g >= 220 or cooking_method in {"pan_fried", "stir_fried", "braised"}:
+        return "generally_compliant"
+    return "compliant"
+
+
+def _sticker_color_for_level(level: str) -> str:
+    return {
+        "compliant": "#9DCF55",
+        "generally_compliant": "#EFD67C",
+        "non_compliant": "#C82727",
+    }.get(level, "#EFD67C")
+
+
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in (patch or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        elif value not in (None, "", []):
+            merged[key] = value
+    return merged
+
+
+def _clamp_number(value: Any, reference: Any, ratio: float, floor: float, ceiling: float) -> int:
+    ref = float(reference or value or floor)
+    raw = float(value or ref)
+    low = max(floor, ref * (1 - ratio))
+    high = min(ceiling, ref * (1 + ratio))
+    return int(round(min(max(raw, low), high)))
+
+
+def _apply_health_thresholds(plan: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    result = dict(plan or {})
+    daily = dict(result.get("dailyGoal") or {})
+    old_daily = previous.get("dailyGoal") or {}
+    if daily:
+        daily["energyKcal"] = _clamp_number(daily.get("energyKcal"), old_daily.get("energyKcal"), 0.10, 1300, 2200)
+        daily["proteinG"] = _clamp_number(daily.get("proteinG"), old_daily.get("proteinG"), 0.15, 50, 100)
+        daily["fatG"] = _clamp_number(daily.get("fatG"), old_daily.get("fatG"), 0.15, 35, 70)
+        daily["carbohydrateG"] = _clamp_number(daily.get("carbohydrateG"), old_daily.get("carbohydrateG"), 0.15, 120, 280)
+        result["dailyGoal"] = daily
+    return result
+
+
+def _adjusted_plan_from_agent(latest_plan: dict[str, Any] | None, plan_patch: dict[str, Any]) -> dict[str, Any] | None:
+    if not latest_plan or not plan_patch:
+        return None
+    base_plan = latest_plan.get("plan") or {}
+    merged = _deep_merge(base_plan, plan_patch)
+    merged = _apply_health_thresholds(merged, base_plan)
+    notes = list(merged.get("demoNotes") or [])
+    reason = plan_patch.get("adjustmentReason")
+    if reason:
+        notes.append(reason)
+    merged["demoNotes"] = notes[-6:]
+    return merged
+
+
+def _vision_report_to_intake_items(report: Any) -> list[dict[str, Any]]:
+    report_data = report.model_dump(mode="json") if hasattr(report, "model_dump") else dict(report)
+    session_id = report_data.get("session_id")
+    intake_time = report_data.get("created_at")
+    items: list[dict[str, Any]] = []
+    for food in report_data.get("foods") or []:
+        level = _vision_compliance_for_food(food)
+        nutrition = food.get("nutrition") or {}
+        weight = round(float(food.get("weight_g") or food.get("estimated_weight_g") or food.get("grams") or 0), 1)
+        profile_key = food.get("profile_key")
+        item_name = "肉松糕点" if profile_key == "pork_floss_pastry" else food.get("name") or "未命名食物"
+        items.append(
+            {
+                "itemName": item_name,
+                "itemType": food.get("item_type") or "food",
+                "grams": weight,
+                "intakeTime": intake_time,
+                "complianceLevel": level,
+                "stickerColor": _sticker_color_for_level(level),
+                "confidence": round(float(food.get("confidence") or 0), 2),
+                "source": "vision",
+                "sourceSessionId": session_id,
+                "sourceTrackId": food.get("track_id"),
+                "visionMeta": {
+                    "category": food.get("category"),
+                    "profileKey": profile_key,
+                    "cookingMethod": food.get("cooking_method"),
+                    "cookingMethodName": food.get("cooking_method_name"),
+                    "weightErrorG": food.get("weight_error_g"),
+                    "sampleCount": food.get("sample_count"),
+                    "stableSeconds": food.get("stable_seconds"),
+                    "convergence": food.get("convergence"),
+                },
+                "nutrients": {
+                    "energyKcal": round(float(food.get("calories_kcal") or nutrition.get("calories_kcal") or 0), 1),
+                    "proteinG": round(float(food.get("protein_g") or nutrition.get("protein_g") or 0), 1),
+                    "fatG": round(float(food.get("fat_g") or nutrition.get("fat_g") or 0), 1),
+                    "carbohydrateG": round(float(food.get("carbs_g") or nutrition.get("carbs_g") or 0), 1),
+                },
+            }
+        )
+    return items
+
+
+def _stickers_from_vision_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stickers: list[dict[str, Any]] = []
+    for item in items:
+        stickers.append(
+            {
+                "itemName": item.get("itemName") or "未命名食物",
+                "complianceLevel": item.get("complianceLevel") or "generally_compliant",
+                "stickerColor": item.get("stickerColor") or _sticker_color_for_level(item.get("complianceLevel") or ""),
+                "sourceSessionId": item.get("sourceSessionId"),
+                "sourceTrackId": item.get("sourceTrackId"),
+                "meta": {
+                    "grams": item.get("grams"),
+                    "confidence": item.get("confidence"),
+                    "visionMeta": item.get("visionMeta") or {},
+                    "nutrients": item.get("nutrients") or {},
+                    "source": item.get("source"),
+                },
+            }
+        )
+    return stickers
+
+
 def _report_data(range_type: str, intakes: list[dict[str, Any]]) -> dict[str, Any]:
     totals = _sum_nutrients([
         {"nutrients": record.get("nutrientActual", {})}
@@ -224,9 +377,11 @@ async def mmy_config() -> dict[str, Any]:
         "runtime": "local",
         "storage": "sqlite",
         "aiConfigured": mmy_ai.config.configured,
+        "ai": mmy_ai.config.public_status(),
+        "loadedEnvFiles": LOADED_ENV_FILES,
         "vision": {
-            "status": "reserved",
-            "message": "视觉识别接口与页面位置已预留，由算法开发文档接入。",
+            "status": "integrated",
+            "message": "视觉识别会话、手机采集、报告生成和摄入记录同步已接入。",
         },
         "mealTypes": ["breakfast", "lunch", "dinner"],
         "colors": {
@@ -237,18 +392,38 @@ async def mmy_config() -> dict[str, Any]:
     }
 
 
+@app.get("/api/mmy/ai/status")
+async def mmy_ai_status(probe: bool = False) -> dict[str, Any]:
+    status = mmy_ai.config.public_status()
+    return {
+        "ok": True,
+        "ai": status,
+        "loadedEnvFiles": LOADED_ENV_FILES,
+        "probe": mmy_ai.probe() if probe else None,
+    }
+
+
 @app.post("/api/mmy/auth/sms-code/send")
 async def mmy_send_sms_code(payload: dict[str, str]) -> dict[str, Any]:
     phone = (payload.get("phone") or "").strip()
+    carrier = (payload.get("carrier") or "auto").strip()
     if not phone:
         raise HTTPException(status_code=422, detail="phone is required")
     code_info = mmy_store.issue_code(phone)
+    gateway = {
+        "provider": "carrier_sms_gateway",
+        "carrier": carrier,
+        "requestId": f"sms_{code_info['code']}_{phone[-4:]}",
+        "ttlSeconds": 60,
+        "mock": True,
+    }
     return {
         "ok": True,
         "phone": phone,
         "expiresInSeconds": 60,
         "demoCode": code_info["code"],
-        "feedback": "验证码已生成。Demo 本地阶段返回 demoCode，后续接入真实验证码发送服务。",
+        "gateway": gateway,
+        "feedback": "已通过运营商短信网关创建验证码请求。Demo 阶段返回 demoCode，正式环境由网关下发短信。",
     }
 
 
@@ -275,7 +450,33 @@ async def mmy_one_tap(payload: dict[str, str]) -> dict[str, Any]:
         "ok": True,
         "user": user,
         "carrier": carrier,
-        "feedback": "一键授权页面流程已打通，后续接入支持三大运营商的 SDK。",
+        "gateway": {
+            "provider": "carrier_one_tap_sdk",
+            "carrier": carrier,
+            "sdkStatus": "mock_authorized",
+            "mock": True,
+        },
+        "feedback": "已模拟三大运营商一键授权。正式环境接入移动/联通/电信统一认证 SDK。",
+    }
+
+
+@app.get("/api/mmy/auth/operator/capabilities")
+async def mmy_operator_capabilities() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "mode": "mock_gateway",
+        "carriers": [
+            {"id": "auto", "name": "自动识别", "supports": ["one_tap", "sms_code"]},
+            {"id": "cmcc", "name": "中国移动", "supports": ["one_tap", "sms_code"]},
+            {"id": "cucc", "name": "中国联通", "supports": ["one_tap", "sms_code"]},
+            {"id": "ctcc", "name": "中国电信", "supports": ["one_tap", "sms_code"]},
+        ],
+        "contract": {
+            "oneTap": "POST /api/mmy/auth/phone-one-tap",
+            "smsSend": "POST /api/mmy/auth/sms-code/send",
+            "smsLogin": "POST /api/mmy/auth/sms-code/login",
+            "tokenPlacement": "正式环境由服务端换取运营商 access token，App 不保存运营商密钥。",
+        },
     }
 
 
@@ -368,8 +569,8 @@ async def mmy_latest_plan(user_id: str) -> dict[str, Any]:
 @app.get("/api/mmy/vision/contract")
 async def mmy_vision_contract() -> dict[str, Any]:
     return {
-        "status": "reserved",
-        "message": "视觉识别由算法侧接入；本接口仅定义前端和业务层依赖字段。",
+        "status": "integrated",
+        "message": "视觉识别已接入 App 业务层；完成采集后可通过 /api/mmy/vision/intake-sync 写入摄入记录。",
         "expectedResult": {
             "itemName": "品类名称",
             "itemType": "food | medical_food | special_diet",
@@ -378,6 +579,7 @@ async def mmy_vision_contract() -> dict[str, Any]:
             "nutrientPayload": "用于计算营养摄入的数据",
             "compliancePayload": "用于判断贴纸颜色的数据",
         },
+        "syncEndpoint": "POST /api/mmy/vision/intake-sync",
         "stickerColors": {
             "compliant": "#9DCF55",
             "generally_compliant": "#EFD67C",
@@ -397,6 +599,62 @@ async def mmy_create_intake(payload: dict[str, Any]) -> dict[str, Any]:
     adjustment = payload.get("adjustment") or _adjustment_for_items(items)
     record = mmy_store.save_intake(user_id, meal_type, items, nutrient_actual, adjustment)
     return {"ok": True, "record": record}
+
+
+@app.get("/api/mmy/intake-records")
+async def mmy_list_intakes(userId: str) -> dict[str, Any]:
+    return {"ok": True, "records": mmy_store.list_intakes(userId)}
+
+
+@app.post("/api/mmy/vision/intake-sync")
+async def mmy_vision_intake_sync(payload: dict[str, Any]) -> dict[str, Any]:
+    user_id = (payload.get("userId") or "").strip()
+    meal_type = payload.get("mealType") or "lunch"
+    if not user_id:
+        raise HTTPException(status_code=422, detail="userId is required")
+    if meal_type not in {"breakfast", "lunch", "dinner"}:
+        raise HTTPException(status_code=422, detail="mealType must be breakfast, lunch, or dinner")
+
+    report_payload = payload.get("report")
+    report_id = (payload.get("reportId") or "").strip()
+    session_id = (payload.get("sessionId") or "").strip()
+    report_obj: Any | None = None
+    if report_payload:
+        report_obj = report_payload
+    elif report_id:
+        try:
+            report_obj = store.report(report_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="vision report not found") from exc
+    elif session_id:
+        try:
+            report_obj = await store.finish(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+    else:
+        raise HTTPException(status_code=422, detail="reportId, sessionId, or report is required")
+
+    report_data = report_obj.model_dump(mode="json") if hasattr(report_obj, "model_dump") else dict(report_obj)
+    items = _vision_report_to_intake_items(report_data)
+    if not items:
+        raise HTTPException(status_code=422, detail="vision report has no food items")
+    nutrient_actual = _sum_nutrients(items)
+    adjustment = _adjustment_for_items(items)
+    adjustment["source"] = "vision"
+    adjustment["visionReportId"] = report_data.get("report_id")
+    adjustment["visionSessionId"] = report_data.get("session_id")
+    record = mmy_store.save_intake(user_id, meal_type, items, nutrient_actual, adjustment)
+    sticker_payload = payload.get("stickers") or _stickers_from_vision_items(items)
+    saved_stickers = mmy_store.save_food_stickers(user_id, record["recordId"], sticker_payload)
+    return {
+        "ok": True,
+        "record": record,
+        "stickers": saved_stickers,
+        "items": items,
+        "nutrientActual": nutrient_actual,
+        "adjustment": adjustment,
+        "visionReport": report_data,
+    }
 
 
 @app.get("/api/mmy/reports/nutrients")
@@ -423,6 +681,8 @@ async def mmy_cleanup_temp_data() -> dict[str, Any]:
 @app.get("/api/mmy/garden/progress")
 async def mmy_garden(userId: str) -> dict[str, Any]:
     intakes = mmy_store.list_intakes(userId)
+    today = datetime.now(CHINA_TZ).date().isoformat()
+    today_stickers = mmy_store.list_food_stickers(userId, today)
     completed_today = bool(intakes) and not any(_has_red_item(record.get("items", [])) for record in intakes[:3])
     days = []
     for index in range(1, 8):
@@ -431,6 +691,7 @@ async def mmy_garden(userId: str) -> dict[str, Any]:
     return {
         "cycleLength": 7,
         "days": days,
+        "todayStickers": today_stickers,
         "bigFlowerEarned": all(day["smallFlowerEarned"] for day in days),
         "criteria": ["摄入量达标", "记录完整", "无红色风险食物"],
     }
@@ -453,10 +714,27 @@ async def mmy_agent_message(payload: dict[str, Any]) -> dict[str, Any]:
     if not user_id or not content:
         raise HTTPException(status_code=422, detail="userId and content are required")
     user_message = mmy_store.add_message(user_id, "user", message_type, content)
-    context = {"latestPlan": mmy_store.latest_plan(user_id), "recentIntakes": mmy_store.list_intakes(user_id)[:3]}
+    latest_plan = mmy_store.latest_plan(user_id)
+    context = {
+        "profile": mmy_store.get_profile(user_id),
+        "latestPlan": latest_plan,
+        "recentIntakes": mmy_store.list_intakes(user_id)[:3],
+        "recentMessages": mmy_store.list_messages(user_id)[-8:],
+    }
     ai = mmy_ai.agent_reply(content, context)
     agent_message = mmy_store.add_message(user_id, "agent", message_type, ai["content"])
-    return {"ok": True, "messages": [user_message, agent_message], "aiStatus": ai["status"]}
+    adjusted_plan = _adjusted_plan_from_agent(latest_plan, ai.get("planPatch") or {})
+    saved_plan = None
+    if adjusted_plan:
+        saved_plan = mmy_store.save_plan(user_id, "agent_adjusted", adjusted_plan, ai["status"])
+    return {
+        "ok": True,
+        "messages": [user_message, agent_message],
+        "aiStatus": ai["status"],
+        "planPatch": ai.get("planPatch") or {},
+        "safetyNotes": ai.get("safetyNotes") or [],
+        "plan": saved_plan,
+    }
 
 
 @app.get("/api/mmy/agent/messages")
@@ -472,7 +750,7 @@ async def mmy_sms_confirm(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "status": "ready_to_open_system_sms",
-        "smsUrl": f"sms:{phone}?body={message}",
+        "smsUrl": f"sms:{phone}?body={quote(message)}",
         "feedback": "请在系统短信界面中由用户手动确认发送，App 不会自动发送短信。",
     }
 

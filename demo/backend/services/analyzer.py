@@ -17,6 +17,27 @@ from backend.services.nutrition import FoodProfile, cooking_method_for_key, nutr
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models"
 DEFAULT_MODEL_PATH = MODEL_DIR / "yolo11n-seg.pt"
 
+DESSERT_SNACK_KEYS = {
+    "cake",
+    "sponge_cake",
+    "cake_roll",
+    "pork_floss_pastry",
+    "cream_cake",
+    "egg_tart",
+    "bread",
+    "sweet_bread",
+    "biscuit",
+    "cheese_cracker",
+    "oreo_cookie",
+    "cookie",
+    "cracker",
+    "wafer",
+    "chips",
+    "chocolate",
+    "candy",
+    "packaged_snack",
+}
+
 
 @dataclass
 class DecodedFrame:
@@ -33,12 +54,16 @@ class FoodComponent:
     polygon: list[list[int]]
     score: float
     crop: np.ndarray
+    profile_hint: str = "unknown_food"
+    profile_confidence: float = 0
     cooking_method: str = "unknown"
     cooking_confidence: float = 0
 
 
 class FoodAnalyzer:
     """Frame analyzer with optional YOLOv11 and conservative OpenCV fallback."""
+
+    _DESSERT_SNACK_KEYS = DESSERT_SNACK_KEYS
 
     def __init__(self) -> None:
         self.model = None
@@ -144,8 +169,12 @@ class FoodAnalyzer:
             "hot dog": "chicken",
             "sandwich": "chicken",
             "pizza": "fried_rice",
-            "cake": "unknown_food",
-            "donut": "unknown_food",
+            "cake": "cake",
+            "donut": "cookie",
+            "cookie": "cookie",
+            "biscuit": "biscuit",
+            "cracker": "cracker",
+            "bread": "bread",
         }
         for needle, key in label_map.items():
             if needle in label:
@@ -161,9 +190,18 @@ class FoodAnalyzer:
 
         mask = self._food_candidate_mask(arr)
         fried_subject_mask = self._fried_subject_mask(arr)
+        masks = [mask]
         if fried_subject_mask.mean() > 0.035:
-            mask = fried_subject_mask
-        components = self._food_components(arr, mask, min_area=max(300, int(width * height * 0.0035)))
+            masks.extend([fried_subject_mask, self._smooth_mask(mask | fried_subject_mask)])
+        components = self._merge_component_candidates(
+            [
+                component
+                for candidate_mask in masks
+                for component in self._food_components(arr, candidate_mask, min_area=max(300, int(width * height * 0.0035)))
+            ],
+            width,
+            height,
+        )
         if not components:
             return []
 
@@ -174,12 +212,16 @@ class FoodAnalyzer:
         subject_components = self._select_subject_components(components, width, height)
         if not subject_components:
             return []
+        subject_components = self._suppress_snack_fragments(subject_components)
 
         tracks: list[FoodTrack] = []
         for idx, component in enumerate(subject_components[:4]):
-            profile = self._profile_from_color(component.crop, idx)
+            profile = profile_for_key(component.profile_hint) if component.profile_confidence >= 0.46 else self._profile_from_color(component.crop, idx)
             if component.cooking_method == "deep_fried" and profile.key in {"rice", "sweet_potato", "carrot", "potato"}:
                 profile = profile_for_key("chicken")
+            if profile.category in {"甜点", "零食"} and component.cooking_method == "deep_fried":
+                component.cooking_method = "raw_light"
+                component.cooking_confidence = max(component.cooking_confidence, 0.54)
             area_score = component.area_px / max(width * height, 1)
             confidence = min(0.9, 0.36 + food_score * 0.34 + component.score * 0.22 + area_score * 1.1 + frame_count * 0.0015)
             if confidence < 0.38:
@@ -199,6 +241,54 @@ class FoodAnalyzer:
                 )
             )
         return tracks
+
+    @staticmethod
+    def _suppress_snack_fragments(components: list[FoodComponent]) -> list[FoodComponent]:
+        if not components:
+            return []
+        snack_subjects = [item for item in components if item.profile_hint in DESSERT_SNACK_KEYS and item.profile_confidence >= 0.55]
+        if not snack_subjects:
+            return components
+        largest_snack_area = max(item.area_px for item in snack_subjects)
+        filtered: list[FoodComponent] = []
+        for component in components:
+            is_small_fried_fragment = (
+                component.profile_hint not in DESSERT_SNACK_KEYS
+                and component.cooking_method == "deep_fried"
+                and component.area_px < largest_snack_area * 0.45
+            )
+            if is_small_fried_fragment:
+                continue
+            filtered.append(component)
+        return filtered
+
+    @staticmethod
+    def _merge_component_candidates(components: list[FoodComponent], frame_width: int, frame_height: int) -> list[FoodComponent]:
+        if not components:
+            return []
+        frame_area = max(1, frame_width * frame_height)
+        ranked = sorted(
+            components,
+            key=lambda item: (
+                item.profile_confidence + (0.18 if item.profile_hint in DESSERT_SNACK_KEYS else 0),
+                item.score,
+                min(item.area_px / frame_area, 0.22),
+            ),
+            reverse=True,
+        )
+        merged: list[FoodComponent] = []
+        for component in ranked:
+            duplicate = False
+            for kept in merged:
+                if FoodAnalyzer._bbox_iou_raw(component.bbox, kept.bbox) >= 0.42 or FoodAnalyzer._bbox_containment(component.bbox, kept.bbox) >= 0.72:
+                    duplicate = True
+                    break
+            if not duplicate:
+                merged.append(component)
+            if len(merged) >= 10:
+                break
+        merged.sort(key=lambda item: (item.score, item.area_px / frame_area), reverse=True)
+        return merged
 
     @staticmethod
     def _food_candidate_mask(arr: np.ndarray) -> np.ndarray:
@@ -326,7 +416,11 @@ class FoodAnalyzer:
             if score < 0.34:
                 continue
             polygon = self._contour_polygon(component_mask, x, y) or self._bbox_polygon(bbox)
+            profile_hint, profile_confidence = self._profile_hint_from_region(crop, component_mask)
             cooking_method, cooking_confidence = self._cooking_method_from_region(crop, component_mask)
+            if profile_hint in self._DESSERT_SNACK_KEYS and cooking_method == "deep_fried":
+                cooking_method = "raw_light"
+                cooking_confidence = max(cooking_confidence, 0.54)
             components.append(
                 FoodComponent(
                     bbox=bbox,
@@ -334,6 +428,8 @@ class FoodAnalyzer:
                     polygon=polygon,
                     score=score,
                     crop=crop,
+                    profile_hint=profile_hint,
+                    profile_confidence=profile_confidence,
                     cooking_method=cooking_method,
                     cooking_confidence=cooking_confidence,
                 )
@@ -479,6 +575,27 @@ class FoodAnalyzer:
         return False
 
     @staticmethod
+    def _bbox_iou_raw(a: list[int], b: list[int]) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+        intersection = iw * ih
+        union = max(1, (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - intersection)
+        return intersection / union
+
+    @staticmethod
+    def _bbox_containment(a: list[int], b: list[int]) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        smaller = max(1, min((ax2 - ax1) * (ay2 - ay1), (bx2 - bx1) * (by2 - by1)))
+        return intersection / smaller
+
+    @staticmethod
     def _component_score(crop: np.ndarray, component_mask: np.ndarray, bbox: list[int], area: int, frame_width: int, frame_height: int) -> float:
         if crop.size == 0:
             return 0
@@ -518,6 +635,9 @@ class FoodAnalyzer:
     def _profile_from_color(self, crop: np.ndarray, index: int) -> FoodProfile:
         if crop.size == 0:
             return profile_for_key("unknown_food")
+        hint, confidence = self._profile_hint_from_region(crop, np.ones(crop.shape[:2], dtype=np.uint8) * 255)
+        if confidence >= 0.46:
+            return profile_for_key(hint)
         mean = crop.reshape(-1, 3).mean(axis=0)
         r, g, b = mean.tolist()
         brightness = (r + g + b) / 3
@@ -544,6 +664,83 @@ class FoodAnalyzer:
         return profile_for_key(["rice", "chicken", "broccoli", "egg", "tofu", "pork_lean", "potato"][index % 7])
 
     @staticmethod
+    def _profile_hint_from_region(crop: np.ndarray, component_mask: np.ndarray) -> tuple[str, float]:
+        if crop.size == 0:
+            return "unknown_food", 0.0
+        selected = crop[component_mask > 0]
+        if selected.size == 0:
+            return "unknown_food", 0.0
+        hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+        selected_hsv = hsv[component_mask > 0]
+        hue = selected_hsv[:, 0]
+        saturation = selected_hsv[:, 1]
+        value = selected_hsv[:, 2]
+        red = selected[:, 0].astype(np.int16)
+        green = selected[:, 1].astype(np.int16)
+        blue = selected[:, 2].astype(np.int16)
+        brightness = float(value.mean() / 255)
+        saturation_mean = float(saturation.mean() / 255)
+        channel_std = float(np.std(selected, axis=0).mean() / 64)
+        mask_area = max(1, int((component_mask > 0).sum()))
+        bbox_area = max(1, crop.shape[0] * crop.shape[1])
+        fill_ratio = mask_area / bbox_area
+        aspect = max(crop.shape[1] / max(crop.shape[0], 1), crop.shape[0] / max(crop.shape[1], 1))
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 55, 135)
+        edge_density = float((edges[component_mask > 0] > 0).mean())
+
+        blue_wrapper = ((blue > 135) & (blue > red + 26) & (blue > green + 10) & (saturation > 70)).mean()
+        cream_wrapper = ((red > 170) & (green > 165) & (blue > 130) & (saturation < 75) & (value > 145)).mean()
+        green_seal = ((hue >= 35) & (hue <= 90) & (saturation > 70) & (value > 65)).mean()
+        white_label = ((saturation < 42) & (value > 180)).mean()
+        dark_cookie = ((value < 80) & (saturation < 95)).mean()
+        golden = ((hue >= 5) & (hue <= 32) & (saturation > 45) & (value > 70)).mean()
+        sponge_yellow = ((hue >= 18) & (hue <= 42) & (saturation > 35) & (saturation < 135) & (value > 115)).mean()
+        cream = ((saturation < 65) & (value > 155)).mean()
+        browned_top = ((hue >= 7) & (hue <= 24) & (saturation > 45) & (value > 75) & (value < 205)).mean()
+
+        wrapper_score = min(1.0, blue_wrapper * 1.35 + cream_wrapper * 0.70 + green_seal * 0.35 + white_label * 0.24 + edge_density * 0.9)
+        wrapper_shape = aspect >= 1.85 or fill_ratio < 0.42 or blue_wrapper > 0.08 or green_seal > 0.02
+        if wrapper_score >= 0.56 and wrapper_shape and (blue_wrapper > 0.12 or cream_wrapper > 0.42):
+            if blue_wrapper > 0.20 and dark_cookie > 0.025:
+                return "oreo_cookie", round(max(0.62, wrapper_score), 2)
+            if cream_wrapper > 0.42 and green_seal > 0.025:
+                return "cheese_cracker", round(max(0.58, wrapper_score), 2)
+            return "packaged_snack", round(max(0.52, wrapper_score), 2)
+
+        cake_score = min(1.0, sponge_yellow * 0.85 + cream * 0.40 + browned_top * 0.36 + max(0.0, 0.46 - saturation_mean) * 0.36)
+        biscuit_score = min(1.0, golden * 0.45 + browned_top * 0.38 + edge_density * 0.65 + channel_std * 0.16)
+        chocolate_score = min(1.0, dark_cookie * 1.15 + edge_density * 0.45)
+        exposed_fried_surface = golden > 0.45 and browned_top > 0.34 and edge_density > 0.09 and aspect < 1.72 and blue_wrapper < 0.05 and green_seal < 0.02
+        layered_cake = cream > 0.24 and sponge_yellow > 0.035 and edge_density < 0.20 and (fill_ratio < 0.70 or aspect >= 1.12)
+        pork_floss_pastry = (
+            aspect >= 1.35
+            and golden > 0.34
+            and browned_top > 0.22
+            and brightness > 0.38
+            and fill_ratio >= 0.42
+            and cream_wrapper < 0.30
+            and blue_wrapper < 0.08
+        )
+
+        if pork_floss_pastry and not wrapper_shape:
+            return "pork_floss_pastry", round(max(0.62, biscuit_score, cake_score), 2)
+
+        if layered_cake and cake_score >= 0.46 and not exposed_fried_surface and cream > 0.10 and brightness > 0.48:
+            if browned_top > 0.22 and cream > 0.18:
+                return "cake_roll", round(max(0.58, cake_score), 2)
+            return "cake", round(max(0.52, cake_score), 2)
+        if chocolate_score >= 0.42 and dark_cookie > 0.20:
+            return "chocolate", round(max(0.50, chocolate_score), 2)
+        biscuit_like_shape = aspect >= 1.85 or fill_ratio < 0.42 or blue_wrapper > 0.08 or green_seal > 0.02 or (cream_wrapper > 0.42 and aspect >= 1.55)
+        if biscuit_score >= 0.58 and biscuit_like_shape and not exposed_fried_surface and brightness > 0.38:
+            if golden > 0.42 and edge_density > 0.08:
+                return "biscuit", round(max(0.54, biscuit_score), 2)
+            return "cookie", round(max(0.50, biscuit_score), 2)
+
+        return "unknown_food", 0.0
+
+    @staticmethod
     def _cooking_method_from_region(crop: np.ndarray, component_mask: np.ndarray) -> tuple[str, float]:
         if crop.size == 0:
             return "unknown", 0
@@ -567,6 +764,10 @@ class FoodAnalyzer:
         fried_score = min(1.0, golden * 0.85 + brown * 0.45 + min(texture, 1.0) * 0.28)
         stir_score = min(1.0, (green + red_sauce) * 0.55 + float(saturation.mean() / 255) * 0.22 + min(texture, 1.0) * 0.12)
         boiled_score = min(1.0, pale * 0.55 + max(0, 0.42 - float(saturation.mean() / 255)) * 0.55)
+        baked_score = min(1.0, golden * 0.55 + brown * 0.24 + max(0.0, 0.34 - float(saturation.mean() / 255)) * 0.22)
+
+        if baked_score >= 0.44 and texture < 1.18 and pale > 0.06:
+            return "baked", round(max(0.55, baked_score), 2)
 
         if fried_score >= 0.48 and fried_score >= stir_score:
             return "deep_fried", round(max(0.58, fried_score), 2)
@@ -616,7 +817,11 @@ class FoodAnalyzer:
         weight_confidence = round(max(0.2, min(0.88, confidence * (1 - relative_error * 0.32))), 2)
         volume_confidence = round(max(0.2, min(0.86, confidence * 0.84)), 2)
         cooking = cooking_method_for_key(cooking_method)
-        display_name = f"{cooking.display_name}{profile.display_name}" if cooking_method not in {"unknown", "raw_light"} else profile.display_name
+        display_name = (
+            profile.display_name
+            if profile.key == "pork_floss_pastry" or cooking_method in {"unknown", "raw_light"}
+            else f"{cooking.display_name}{profile.display_name}"
+        )
         return FoodTrack(
             track_id=track_id,
             name=display_name,
@@ -802,6 +1007,7 @@ class FoodAnalyzer:
             "carrot": "#f28b38",
             "potato": "#d7b16c",
             "sweet_potato": "#f07f45",
+            "pork_floss_pastry": "#d9873f",
             "corn": "#f6d84d",
             "wood_ear": "#5b5149",
             "apple": "#ff6b6b",

@@ -22,11 +22,13 @@
           <canvas id="captureCanvas" hidden></canvas>
           <div class="reticle"></div>
           <div id="cameraEmpty" class="camera-empty">等待摄像头授权</div>
+          <div id="cameraDebug" class="camera-debug">未连接摄像头</div>
         </div>
 
         <section class="mobile-controls">
           <button id="joinBtn" type="button">连接会话</button>
           <button id="cameraBtn" type="button" disabled>授权摄像头</button>
+          <button id="switchCameraBtn" type="button" disabled>切换镜头</button>
           <button id="streamBtn" type="button" disabled>开始推流</button>
         </section>
 

@@ -50,12 +50,14 @@ class MmyStore:
         self._init_db()
 
     def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=15)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 15000")
         return conn
 
     def _init_db(self) -> None:
         with self.connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -96,6 +98,19 @@ class MmyStore:
                     items_json TEXT NOT NULL,
                     nutrient_actual_json TEXT NOT NULL,
                     adjustment_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS food_stickers (
+                    sticker_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    record_id TEXT,
+                    source_session_id TEXT,
+                    source_track_id TEXT,
+                    item_name TEXT NOT NULL,
+                    compliance_level TEXT NOT NULL,
+                    sticker_color TEXT NOT NULL,
+                    image_svg TEXT,
+                    meta_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS reports (
@@ -336,6 +351,82 @@ class MmyStore:
                 ),
             )
         return record
+
+    def save_food_stickers(
+        self,
+        user_id: str,
+        record_id: str,
+        stickers: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        saved: list[dict[str, Any]] = []
+        created_at = now_iso()
+        with self.connect() as conn:
+            for sticker in stickers:
+                item_name = sticker.get("itemName") or sticker.get("name") or "未命名食物"
+                compliance_level = sticker.get("complianceLevel") or "generally_compliant"
+                sticker_color = sticker.get("stickerColor") or "#EFD67C"
+                record = {
+                    "stickerId": make_id("sticker"),
+                    "userId": user_id,
+                    "recordId": record_id,
+                    "sourceSessionId": sticker.get("sourceSessionId"),
+                    "sourceTrackId": sticker.get("sourceTrackId"),
+                    "itemName": item_name,
+                    "complianceLevel": compliance_level,
+                    "stickerColor": sticker_color,
+                    "imageSvg": sticker.get("imageSvg"),
+                    "meta": sticker.get("meta") or {},
+                    "createdAt": created_at,
+                }
+                conn.execute(
+                    """
+                    INSERT INTO food_stickers
+                    (sticker_id, user_id, record_id, source_session_id, source_track_id,
+                     item_name, compliance_level, sticker_color, image_svg, meta_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record["stickerId"],
+                        user_id,
+                        record_id,
+                        record["sourceSessionId"],
+                        record["sourceTrackId"],
+                        item_name,
+                        compliance_level,
+                        sticker_color,
+                        record["imageSvg"],
+                        dumps(record["meta"]),
+                        created_at,
+                    ),
+                )
+                saved.append(record)
+        return saved
+
+    def list_food_stickers(self, user_id: str, day: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM food_stickers WHERE user_id = ?"
+        params: list[Any] = [user_id]
+        if day:
+            query += " AND substr(created_at, 1, 10) = ?"
+            params.append(day)
+        query += " ORDER BY created_at DESC"
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "stickerId": row["sticker_id"],
+                "userId": row["user_id"],
+                "recordId": row["record_id"],
+                "sourceSessionId": row["source_session_id"],
+                "sourceTrackId": row["source_track_id"],
+                "itemName": row["item_name"],
+                "complianceLevel": row["compliance_level"],
+                "stickerColor": row["sticker_color"],
+                "imageSvg": row["image_svg"],
+                "meta": loads(row["meta_json"], {}),
+                "createdAt": row["created_at"],
+            }
+            for row in rows
+        ]
 
     def list_intakes(self, user_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:

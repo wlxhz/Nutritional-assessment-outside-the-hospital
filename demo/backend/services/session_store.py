@@ -28,6 +28,13 @@ from backend.services.nutrition import cooking_method_for_key, nutrition_for_wei
 
 
 CHINA_TZ = timezone(timedelta(hours=8))
+DESSERT_SNACK_CATEGORIES = {"甜点", "零食", "水果"}
+
+
+def _display_name_for_track(profile_key: str, profile_display_name: str, cooking_method: str, cooking_display_name: str) -> str:
+    if profile_key == "pork_floss_pastry" or cooking_method in {"unknown", "raw_light"}:
+        return profile_display_name
+    return f"{cooking_display_name}{profile_display_name}"
 
 
 @dataclass
@@ -288,7 +295,7 @@ class SessionStore:
         cooking = cooking_method_for_key(cooking_method)
         updated = detection.model_copy(deep=True)
         updated.track_id = aggregate.track_id
-        updated.name = f"{cooking.display_name}{profile.display_name}" if cooking_method not in {"unknown", "raw_light"} else profile.display_name
+        updated.name = _display_name_for_track(profile.key, profile.display_name, cooking_method, cooking.display_name)
         updated.category = profile.category
         updated.profile_key = profile.key
         updated.cooking_method = cooking_method
@@ -465,6 +472,8 @@ class SessionStore:
 
     @staticmethod
     def _stable_cooking_method(previous: FoodTrack, detection: FoodTrack) -> str:
+        if detection.category in DESSERT_SNACK_CATEGORIES:
+            return detection.cooking_method
         if detection.cooking_confidence >= 0.52:
             return detection.cooking_method
         if previous.cooking_confidence >= 0.45:
@@ -475,6 +484,8 @@ class SessionStore:
     def _stable_profile_key(previous: FoodTrack, detection: FoodTrack, scale_result: dict[str, float | int | bool | str]) -> str:
         if previous.profile_key == detection.profile_key:
             return detection.profile_key
+        if detection.category in DESSERT_SNACK_CATEGORIES or previous.category in DESSERT_SNACK_CATEGORIES:
+            return detection.profile_key or previous.profile_key
         if scale_result["corrected"] and previous.sample_count >= 3:
             return previous.profile_key
         if previous.convergence >= 0.34 and previous.confidence >= detection.confidence * 0.88:
@@ -524,11 +535,14 @@ class SessionStore:
             current = aggregate.track
             same_profile = current.profile_key == detection.profile_key
             same_category = current.category == detection.category
+            category_shift = current.category != detection.category
             iou = SessionStore._bbox_iou(current.bbox, detection.bbox)
             proximity = SessionStore._center_proximity(current.bbox, detection.bbox)
             area_ratio = SessionStore._bbox_scale_ratio(current.bbox, detection.bbox)
             scale_compatible = 0.20 <= area_ratio <= 5.0
             score = iou * 0.46 + proximity * 0.34 + (0.15 if same_profile else 0.07 if same_category else 0) + (0.05 if scale_compatible else 0)
+            if category_shift and (current.category in DESSERT_SNACK_CATEGORIES or detection.category in DESSERT_SNACK_CATEGORIES):
+                score -= 0.18
             if score > best_score:
                 best_id = track_id
                 best_score = score
@@ -620,9 +634,14 @@ class SessionStore:
                     "track_id": food.track_id,
                     "name": food.name,
                     "category": food.category,
+                    "profile_key": food.profile_key,
+                    "item_type": "food",
                     "cooking_method": food.cooking_method,
                     "cooking_method_name": food.cooking_method_name,
                     "cooking_confidence": food.cooking_confidence,
+                    "bbox": food.bbox,
+                    "polygon": food.polygon,
+                    "mask_svg_path": food.mask_svg_path,
                     "weight_g": food.estimated_weight_g,
                     "weight_error_g": food.weight_error_g,
                     "volume_ml": food.volume_ml,

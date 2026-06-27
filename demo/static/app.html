@@ -10,11 +10,14 @@
     <main class="app-shell">
       <section class="phone-frame" aria-label="慢慢养 App 预览">
         <header class="app-header">
-          <div>
-            <p class="brand-kicker">慢慢养</p>
-            <h1 id="screenTitle">花园</h1>
+          <div class="brand-block">
+            <h1>慢慢养</h1>
+            <p id="screenTitle" class="screen-kicker">花园</p>
           </div>
-          <div class="status-chip" id="loginState">未登录</div>
+          <div class="header-actions">
+            <div class="status-chip" id="loginState">未登录</div>
+            <button id="logoutBtn" class="logout-btn hidden" type="button">退出</button>
+          </div>
         </header>
 
         <section id="onboarding" class="onboarding active">
@@ -30,6 +33,15 @@
               <span>手机号</span>
               <input id="phoneInput" inputmode="tel" placeholder="13800000000" value="13800000000" />
             </label>
+            <label class="field">
+              <span>运营商</span>
+              <select id="carrierSelect">
+                <option value="auto">自动识别</option>
+                <option value="cmcc">中国移动</option>
+                <option value="cucc">中国联通</option>
+                <option value="ctcc">中国电信</option>
+              </select>
+            </label>
             <div class="split-actions">
               <button id="oneTapBtn" class="secondary" type="button">一键授权</button>
               <button id="sendCodeBtn" class="secondary" type="button">获取验证码</button>
@@ -39,6 +51,10 @@
               <input id="codeInput" inputmode="numeric" placeholder="本地 Demo 会返回验证码" />
             </label>
             <button id="loginBtn" class="primary" type="button">验证码登录</button>
+            <label class="check-field">
+              <input id="rememberLogin" type="checkbox" checked />
+              <span>记住登录状态</span>
+            </label>
             <p id="authFeedback" class="feedback"></p>
           </div>
 
@@ -61,7 +77,7 @@
                   <option value="other">其他</option>
                 </select>
               </label>
-              <label class="field">
+              <label id="diseaseOtherField" class="field hidden">
                 <span>其他病症</span>
                 <input id="diseaseOtherText" placeholder="选择其他时填写" />
               </label>
@@ -105,6 +121,10 @@
               <span>疾病史</span>
               <input id="diseaseHistory" value="长期慢病管理需求" />
             </label>
+            <label class="field">
+              <span>饮食偏好</span>
+              <input id="dietPreference" value="清淡、少油、早餐喜欢粥类" />
+            </label>
             <button id="saveProfileBtn" class="primary" type="button">保存并生成方案</button>
             <p id="profileFeedback" class="feedback"></p>
           </div>
@@ -116,9 +136,22 @@
               <p class="eyebrow">爱人如养花</p>
               <h2>连续 7 天，养成一朵大花</h2>
             </div>
-            <div class="big-flower" id="bigFlower">花</div>
+            <div class="big-flower" id="bigFlower">
+              <img src="/static/images/garden-flower.png" alt="花朵成长贴图" />
+            </div>
           </div>
           <div class="week-grid" id="gardenDays"></div>
+          <div class="soft-panel garden-sticker-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">今日饮食贴纸</p>
+                <h2>识别后自动收藏</h2>
+              </div>
+            </div>
+            <div id="gardenFoodStickers" class="garden-food-stickers">
+              <span class="empty-vision">今日还没有保存饮食贴纸</span>
+            </div>
+          </div>
           <div class="soft-panel">
             <h3>今日完成条件</h3>
             <ul class="check-list">
@@ -144,41 +177,75 @@
           <div class="soft-panel vision-slot">
             <div class="section-head">
               <div>
-                <p class="eyebrow">视觉识别预留位</p>
-                <h2>等待算法接口接入</h2>
+                <p class="eyebrow">视觉识别系统</p>
+                <h2>手机采集食物克重</h2>
               </div>
-              <span class="mini-badge">Reserved</span>
+              <span id="visionStatusBadge" class="mini-badge">未开始</span>
             </div>
-            <p>这里保留摄像头识别、食物贴纸生成、克数估算和特医/特膳识别的位置。</p>
-            <button id="visionContractBtn" class="secondary" type="button">查看接口契约</button>
+            <div class="vision-actions">
+              <button id="createVisionBtn" class="primary" type="button">创建识别会话</button>
+              <button id="finishVisionBtn" class="secondary" type="button" disabled>生成报告</button>
+              <button id="syncVisionBtn" class="secondary" type="button" disabled>同步到摄入记录</button>
+            </div>
+            <div id="visionSessionPanel" class="vision-session hidden">
+              <div class="qr-card">
+                <img id="visionQr" alt="手机采集二维码" />
+              </div>
+              <div class="vision-copy">
+                <strong id="visionGuidance">请创建识别会话。</strong>
+                <span id="visionMeta">手机扫码后授权摄像头，连续采集 5-10 秒。</span>
+                <a id="captureLink" href="#" target="_blank" rel="noreferrer">打开采集页</a>
+              </div>
+            </div>
+            <div id="visionRealtimePanel" class="vision-realtime hidden">
+              <div class="vision-live-layout">
+                <div class="vision-stage">
+                  <img id="visionLatestFrame" alt="手机最新上传画面" />
+                  <svg id="visionOverlaySvg" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMid meet"></svg>
+                  <div id="visionEmptyFrame" class="vision-empty-frame">等待手机画面</div>
+                </div>
+                <aside class="vision-side-panel">
+                  <div class="vision-detail-grid">
+                    <div class="vision-summary-metric">
+                      <span>总重量</span>
+                      <strong id="visionTotalWeight">0g</strong>
+                    </div>
+                    <div class="vision-summary-metric">
+                      <span>热量</span>
+                      <strong id="visionTotalCalories">0kcal</strong>
+                    </div>
+                    <div class="vision-summary-metric">
+                      <span>测量质量</span>
+                      <strong id="visionQualityScore">0%</strong>
+                    </div>
+                    <div class="vision-summary-metric">
+                      <span>收敛度</span>
+                      <strong id="visionConvergence">0%</strong>
+                    </div>
+                  </div>
+                  <div id="visionQualityBars" class="vision-quality-bars"></div>
+                </aside>
+              </div>
+            </div>
+            <div id="visionFoodList" class="vision-food-list"></div>
+            <div id="visionReportSummary" class="vision-report-summary hidden"></div>
+            <button id="visionContractBtn" class="secondary compact-btn" type="button">查看接口契约</button>
             <pre id="visionContract" class="contract-box"></pre>
-          </div>
-
-          <div class="soft-panel">
-            <div class="section-head">
-              <h2>营养方案</h2>
-              <span id="aiStatus" class="mini-badge">未生成</span>
-            </div>
-            <div id="planSummary" class="plan-summary"></div>
-          </div>
-
-          <div class="meal-tabs" id="mealTabs"></div>
-          <div class="soft-panel">
-            <div class="section-head">
-              <h2>红色风险弹窗 Demo</h2>
-              <span class="mini-badge risk-text">短信确认</span>
-            </div>
-            <p>识别到红色风险食物时，提供替代食物、原因说明、继续进食确认和短信通知入口。</p>
-            <button id="riskBtn" class="danger" type="button">模拟红色风险食物</button>
-            <div id="riskAlert" class="risk-alert hidden">
-              <strong>风险原因</strong>
-              <p>当前食物与营养方案不匹配，建议替换为低糖、高纤维选择。</p>
-              <button id="smsBtn" class="secondary" type="button">通知紧急联系人</button>
-            </div>
           </div>
         </section>
 
         <section id="recordScreen" class="screen">
+          <div class="soft-panel nutrition-record-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">营养方案</p>
+                <h2>每日目标与三餐拆分</h2>
+              </div>
+              <span id="aiStatus" class="mini-badge">未生成</span>
+            </div>
+            <div id="planSummary" class="plan-summary"></div>
+            <div class="meal-tabs" id="mealTabs"></div>
+          </div>
           <div class="segmented" id="rangeTabs">
             <button class="active" data-range="day" type="button">日</button>
             <button data-range="week" type="button">周</button>
@@ -215,6 +282,21 @@
           <button data-screen="infoScreen" type="button">信息</button>
           <button data-screen="recordScreen" type="button">记录</button>
         </nav>
+
+        <div id="riskAlert" class="risk-alert risk-modal hidden" role="dialog" aria-modal="true" aria-labelledby="riskTitle">
+          <div class="risk-alert-head">
+            <strong id="riskTitle">红色风险食物</strong>
+            <button id="riskCloseBtn" class="icon-btn" type="button">×</button>
+          </div>
+          <p id="riskReason">当前食物与营养方案不匹配，建议替换为低糖、高纤维选择。</p>
+          <div id="riskItems" class="risk-items"></div>
+          <p class="risk-suggestion">建议替换为清蒸鱼、鸡蛋、豆腐、绿叶菜或无糖酸奶。</p>
+          <div class="risk-actions">
+            <button id="riskContinueBtn" class="secondary" type="button">确认继续进食</button>
+            <button id="smsBtn" class="danger" type="button">通知紧急联系人</button>
+          </div>
+          <p id="smsFeedback" class="feedback"></p>
+        </div>
       </section>
 
       <aside class="dev-panel">

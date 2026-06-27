@@ -55,6 +55,7 @@ COOKING_METHODS: dict[str, CookingAdjustment] = {
     "deep_fried": CookingAdjustment("deep_fried", "炸制", calories_delta_per_100g=120, fat_delta_per_100g=10, carbs_delta_per_100g=7, sodium_delta_per_100g=180),
     "braised": CookingAdjustment("braised", "红烧/卤制", calories_delta_per_100g=45, fat_delta_per_100g=3, carbs_delta_per_100g=3, sodium_delta_per_100g=220),
     "roasted": CookingAdjustment("roasted", "烤制", calories_delta_per_100g=35, fat_delta_per_100g=2, sodium_delta_per_100g=90),
+    "baked": CookingAdjustment("baked", "烘焙", sodium_delta_per_100g=40),
 }
 
 
@@ -125,6 +126,25 @@ FOOD_PROFILES: dict[str, FoodProfile] = {
     "banana": f("banana", "香蕉", "水果", 0.66, 0.08, 89, 1.1, 22.8, 0.3, 2.6, 1),
     "orange": f("orange", "橙子", "水果", 0.62, 0.08, 47, 0.9, 11.8, 0.1, 2.4, 0),
     "watermelon": f("watermelon", "西瓜", "水果", 0.58, 0.08, 30, 0.6, 7.6, 0.2, 0.4, 1),
+    # Desserts and packaged snacks
+    "cake": f("cake", "蛋糕", "甜点", 0.42, 0.12, 348, 5.2, 50.6, 14.0, 1.0, 300),
+    "sponge_cake": f("sponge_cake", "海绵蛋糕", "甜点", 0.35, 0.10, 320, 6.0, 55.0, 9.0, 0.8, 220),
+    "cake_roll": f("cake_roll", "蛋糕卷", "甜点", 0.45, 0.12, 360, 6.0, 48.0, 16.0, 0.8, 260),
+    "pork_floss_pastry": f("pork_floss_pastry", "肉松糕点", "甜点", 0.48, 0.12, 370, 9.0, 46.0, 17.0, 1.0, 420),
+    "cream_cake": f("cream_cake", "奶油蛋糕", "甜点", 0.48, 0.14, 380, 4.5, 42.0, 22.0, 0.6, 240),
+    "egg_tart": f("egg_tart", "蛋挞", "甜点", 0.55, 0.12, 375, 6.4, 37.0, 22.0, 0.5, 230),
+    "bread": f("bread", "面包", "甜点", 0.32, 0.10, 265, 8.8, 49.0, 3.2, 2.7, 490),
+    "sweet_bread": f("sweet_bread", "甜面包", "甜点", 0.35, 0.11, 330, 7.5, 55.0, 9.0, 1.6, 330),
+    "biscuit": f("biscuit", "饼干", "零食", 0.50, 0.12, 435, 7.0, 70.0, 14.0, 2.5, 500),
+    "cheese_cracker": f("cheese_cracker", "芝士饼干", "零食", 0.55, 0.12, 480, 8.0, 62.0, 22.0, 2.0, 700),
+    "oreo_cookie": f("oreo_cookie", "夹心饼干", "零食", 0.58, 0.13, 480, 5.0, 70.0, 20.0, 2.0, 450),
+    "cookie": f("cookie", "曲奇", "零食", 0.52, 0.12, 500, 6.0, 64.0, 25.0, 2.0, 420),
+    "cracker": f("cracker", "苏打饼干", "零食", 0.45, 0.11, 430, 8.0, 72.0, 11.0, 2.4, 850),
+    "wafer": f("wafer", "威化饼干", "零食", 0.32, 0.10, 520, 6.5, 62.0, 28.0, 1.8, 260),
+    "chips": f("chips", "薯片", "零食", 0.18, 0.07, 540, 6.0, 52.0, 34.0, 4.0, 520),
+    "chocolate": f("chocolate", "巧克力", "零食", 1.05, 0.10, 546, 4.9, 61.0, 31.0, 7.0, 24),
+    "candy": f("candy", "糖果", "零食", 1.20, 0.12, 390, 0.0, 98.0, 0.0, 0.0, 20),
+    "packaged_snack": f("packaged_snack", "包装零食", "零食", 0.42, 0.18, 470, 6.0, 66.0, 20.0, 2.0, 480),
     # Common mixed dishes
     "tomato_egg": f("tomato_egg", "番茄炒蛋", "混合菜", 0.78, 0.14, 98, 6.2, 4.2, 6.5, 0.8, 220),
     "mapo_tofu": f("mapo_tofu", "麻婆豆腐", "混合菜", 0.88, 0.16, 128, 8.0, 5.0, 8.5, 1.2, 420),

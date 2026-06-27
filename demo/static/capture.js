@@ -5,7 +5,9 @@ const capture = {
   sessionId: params.get("session_id"),
   token: params.get("token"),
   stream: null,
+  facingMode: "environment",
   timer: null,
+  healthTimer: null,
   running: false,
   uploading: false,
   frameIntervalMs: 520,
@@ -17,6 +19,7 @@ const capture = {
 qs("#mobileSessionId").value = capture.sessionId || "missing";
 qs("#joinBtn").addEventListener("click", joinSession);
 qs("#cameraBtn").addEventListener("click", requestCamera);
+qs("#switchCameraBtn").addEventListener("click", switchCamera);
 qs("#streamBtn").addEventListener("click", toggleStream);
 
 function setStatus(status, label) {
@@ -27,6 +30,112 @@ function setStatus(status, label) {
 
 function setHint(message) {
   qs("#mobileHint").value = message;
+}
+
+function setCameraDebug(message) {
+  qs("#cameraDebug").textContent = message;
+}
+
+function videoStatus() {
+  const video = qs("#cameraPreview");
+  const track = capture.stream?.getVideoTracks?.()[0];
+  const settings = track?.getSettings?.() || {};
+  return {
+    width: video.videoWidth || 0,
+    height: video.videoHeight || 0,
+    readyState: video.readyState,
+    paused: video.paused,
+    trackState: track?.readyState || "none",
+    muted: Boolean(track?.muted),
+    label: track?.label || "未命名摄像头",
+    settings,
+  };
+}
+
+function renderCameraDebug(prefix = "") {
+  const status = videoStatus();
+  const size = status.width && status.height ? `${status.width}x${status.height}` : "0x0";
+  const settingSize = status.settings.width && status.settings.height ? `${status.settings.width}x${status.settings.height}` : "-";
+  setCameraDebug(`${prefix}${prefix ? "\n" : ""}画面 ${size} / 轨道 ${status.trackState}${status.muted ? " muted" : ""} / video ${status.readyState}${status.paused ? " paused" : ""}\n设备 ${status.label} / 设置 ${settingSize}`);
+}
+
+function stopCamera() {
+  if (capture.healthTimer) window.clearInterval(capture.healthTimer);
+  capture.healthTimer = null;
+  if (capture.timer) window.clearTimeout(capture.timer);
+  capture.timer = null;
+  capture.running = false;
+  capture.uploading = false;
+  if (capture.stream) {
+    capture.stream.getTracks().forEach((track) => track.stop());
+  }
+  capture.stream = null;
+  const video = qs("#cameraPreview");
+  video.pause();
+  video.srcObject = null;
+  qs("#streamBtn").disabled = true;
+  qs("#streamBtn").textContent = "开始推流";
+}
+
+function waitForVideoReady(video, timeoutMs = 3600) {
+  return new Promise((resolve, reject) => {
+    if (video.videoWidth && video.videoHeight) {
+      resolve(true);
+      return;
+    }
+    const started = Date.now();
+    let timer = null;
+    const cleanup = () => {
+      if (timer) window.clearInterval(timer);
+      video.removeEventListener("loadedmetadata", check);
+      video.removeEventListener("canplay", check);
+      video.removeEventListener("playing", check);
+      video.removeEventListener("error", onError);
+    };
+    const check = () => {
+      renderCameraDebug("等待摄像头画面");
+      if (video.videoWidth && video.videoHeight) {
+        cleanup();
+        resolve(true);
+      } else if (Date.now() - started > timeoutMs) {
+        cleanup();
+        reject(new Error("摄像头已授权，但浏览器没有输出可用画面。请点“切换镜头”或在浏览器权限里重新允许摄像头。"));
+      }
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error(video.error?.message || "视频预览播放失败"));
+    };
+    video.addEventListener("loadedmetadata", check);
+    video.addEventListener("canplay", check);
+    video.addEventListener("playing", check);
+    video.addEventListener("error", onError);
+    timer = window.setInterval(check, 180);
+    check();
+  });
+}
+
+async function bindStream(stream) {
+  const video = qs("#cameraPreview");
+  capture.stream = stream;
+  video.srcObject = stream;
+  video.muted = true;
+  video.playsInline = true;
+  await video.play();
+  await waitForVideoReady(video);
+  stream.getVideoTracks().forEach((track) => {
+    track.onended = () => {
+      setStatus("error", "摄像头中断");
+      setHint("摄像头轨道已中断，请重新授权摄像头。");
+      renderCameraDebug("轨道已中断");
+      stopCamera();
+    };
+    track.onmute = () => renderCameraDebug("摄像头暂未输出画面");
+    track.onunmute = () => renderCameraDebug("摄像头画面恢复");
+  });
+  if (capture.healthTimer) window.clearInterval(capture.healthTimer);
+  capture.healthTimer = window.setInterval(() => renderCameraDebug(), 1200);
+  renderCameraDebug("摄像头就绪");
 }
 
 async function joinSession() {
@@ -62,27 +171,44 @@ async function joinSession() {
 
 async function requestCamera() {
   try {
+    stopCamera();
+    setStatus("ready", "请求摄像头");
+    setHint("正在请求摄像头权限。如果浏览器弹窗，请选择允许。");
+    setCameraDebug("正在打开摄像头...");
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
-        facingMode: { ideal: "environment" },
+        facingMode: { ideal: capture.facingMode },
         width: { ideal: 1280 },
         height: { ideal: 720 },
         frameRate: { ideal: 30 },
       },
     });
-    capture.stream = stream;
-    qs("#cameraPreview").srcObject = stream;
+    await bindStream(stream);
     qs("#cameraEmpty").style.display = "none";
     qs("#streamBtn").disabled = false;
+    qs("#switchCameraBtn").disabled = false;
     setStatus("ready", "摄像头就绪");
     setHint("摄像头已授权。请将餐盘放入框内，然后开始连续推流。");
-    await sendEvent("camera_permission_granted", { tracks: stream.getVideoTracks().map((track) => track.label) });
+    await sendEvent("camera_permission_granted", {
+      tracks: stream.getVideoTracks().map((track) => track.label),
+      status: videoStatus(),
+    });
   } catch (error) {
+    stopCamera();
+    qs("#cameraEmpty").style.display = "grid";
+    qs("#switchCameraBtn").disabled = false;
     setStatus("error", "授权失败");
-    setHint(`摄像头授权失败：${error.message}。Android 真机访问电脑 IP 时通常需要 HTTPS 地址。`);
-    await sendEvent("camera_permission_denied", { message: error.message });
+    setHint(`摄像头无法输出画面：${error.message}\n可尝试：1. 点“切换镜头”；2. 浏览器地址栏权限里重新允许摄像头；3. 用系统浏览器打开 HTTPS 采集链接。`);
+    renderCameraDebug(`失败：${error.name || "CameraError"} ${error.message}`);
+    await sendEvent("camera_permission_denied", { message: error.message, name: error.name, status: videoStatus() });
   }
+}
+
+async function switchCamera() {
+  capture.facingMode = capture.facingMode === "environment" ? "user" : "environment";
+  setHint(`正在切换到${capture.facingMode === "environment" ? "后置" : "前置"}摄像头...`);
+  await requestCamera();
 }
 
 async function toggleStream() {
@@ -98,6 +224,13 @@ async function toggleStream() {
   }
   if (!capture.stream) {
     setHint("请先授权摄像头。");
+    return;
+  }
+  const status = videoStatus();
+  if (!status.width || !status.height || status.trackState !== "live") {
+    setStatus("error", "画面未就绪");
+    setHint("摄像头还没有输出画面，无法推流。请点“授权摄像头”重试，或点“切换镜头”。");
+    renderCameraDebug("推流前检查失败");
     return;
   }
   capture.running = true;
@@ -120,6 +253,7 @@ async function uploadFrame() {
   if (capture.uploading || !capture.stream || !capture.running) return;
   const video = qs("#cameraPreview");
   if (!video.videoWidth || !video.videoHeight) {
+    renderCameraDebug("等待视频宽高");
     scheduleNextFrame(180);
     return;
   }

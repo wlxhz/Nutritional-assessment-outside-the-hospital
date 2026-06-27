@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import uvicorn
@@ -11,6 +12,8 @@ from backend.main import app
 CERT_DIR = Path(__file__).resolve().parent / "certs"
 CERT_FILE = CERT_DIR / "localhost.pem"
 KEY_FILE = CERT_DIR / "localhost-key.pem"
+HTTP_PORT = int(os.getenv("HTTP_PORT", "8001"))
+HTTPS_PORT = int(os.getenv("HTTPS_PORT", "8443"))
 
 
 async def main() -> None:
@@ -21,7 +24,7 @@ async def main() -> None:
         uvicorn.Config(
             app,
             host="0.0.0.0",
-            port=8000,
+            port=HTTP_PORT,
             log_level="info",
         )
     )
@@ -29,7 +32,7 @@ async def main() -> None:
         uvicorn.Config(
             app,
             host="0.0.0.0",
-            port=8443,
+            port=HTTPS_PORT,
             log_level="info",
             ssl_certfile=str(CERT_FILE),
             ssl_keyfile=str(KEY_FILE),
