@@ -40,6 +40,7 @@ store = SessionStore(analyzer)
 mmy_store = MmyStore(default_db_path(BASE_DIR))
 mmy_ai = MmyAiClient(AiConfig.from_env())
 mmy_parser = LocalPrescriptionParser()
+sms_test_log: list[dict[str, Any]] = []
 
 app = FastAPI(title="Realtime Food Weight Demo", version="0.1.0")
 app.add_middleware(
@@ -751,12 +752,29 @@ async def mmy_sms_confirm(payload: dict[str, Any]) -> dict[str, Any]:
     contact = payload.get("contact") or {}
     message = payload.get("message") or "检测到红色风险食物，请关注慢慢养 App 提示。"
     phone = contact.get("phone", "")
+    mode = payload.get("mode") or "risk_alert"
+    entry = {
+        "phone": phone,
+        "message": message,
+        "mode": mode,
+        "createdAt": datetime.now(CHINA_TZ).isoformat(),
+    }
+    sms_test_log.append(entry)
+    del sms_test_log[:-20]
     return {
         "ok": True,
         "status": "ready_to_open_system_sms",
         "smsUrl": f"sms:{phone}?body={quote(message)}",
+        "entry": entry,
         "feedback": "请在系统短信界面中由用户手动确认发送，App 不会自动发送短信。",
     }
+
+
+@app.get("/api/mmy/sms/test-log")
+async def mmy_sms_test_log() -> dict[str, Any]:
+    if os.getenv("APP_ENV") == "production":
+        raise HTTPException(status_code=404, detail="not found")
+    return {"ok": True, "items": sms_test_log}
 
 
 @app.get("/api/network-info")

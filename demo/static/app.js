@@ -1091,6 +1091,10 @@ function closeRisk() {
 function speakRiskAlert(items = []) {
   const names = items.map(displayFoodName).filter(Boolean).join("、") || "当前食物";
   const text = `慢慢养提醒，识别到红色风险食物：${names}。建议先暂停进食，并联系家人确认。`;
+  if (window.ManmanyangNative?.speakRiskAlert) {
+    window.ManmanyangNative.speakRiskAlert(text);
+    return true;
+  }
   if (!("speechSynthesis" in window)) return false;
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
@@ -1112,10 +1116,19 @@ async function notifyEmergencyContact(items = [], { auto = false } = {}) {
     body: JSON.stringify({
       contact: { phone: state.profile.emergencyContactPhone },
       message: `慢慢养提醒：识别到${names}，属于红色风险食物，请及时关注 ${state.user?.phone || "用户"} 的饮食情况。`,
+      mode: auto ? "auto_risk_alert" : "manual_risk_alert",
     }),
   });
-  $("smsFeedback").textContent = data.feedback || "已准备拉起系统短信。";
-  if (auto || window.confirm("将拉起系统短信界面，由用户手动确认发送。是否继续？")) {
+  const message = data.entry?.message || `慢慢养提醒：识别到${names}，属于红色风险食物，请及时关注。`;
+  if (window.ManmanyangNative?.sendRiskSms) {
+    window.ManmanyangNative.sendRiskSms(state.profile.emergencyContactPhone, message);
+    $("smsFeedback").textContent = auto ? "已调用手机短信权限通知紧急联系人。" : "已拉起手机短信权限通知紧急联系人。";
+    return true;
+  }
+  $("smsFeedback").textContent = auto
+    ? "已生成紧急联系人短信请求；当前浏览器测试环境不会自动跳转短信。"
+    : (data.feedback || "已准备拉起系统短信。");
+  if (!auto && window.confirm("将拉起系统短信界面，由用户手动确认发送。是否继续？")) {
     window.location.href = data.smsUrl;
   }
   return true;
@@ -1245,6 +1258,12 @@ function bindEvents() {
       state.rangeType = button.dataset.range;
       await refreshReport();
     });
+  });
+  window.addEventListener("mmy-native-sms-result", (event) => {
+    const detail = event.detail || {};
+    $("smsFeedback").textContent = detail.ok
+      ? "手机系统已接收短信发送请求。"
+      : `手机短信发送失败：${detail.error || "权限未授权"}`;
   });
 }
 
