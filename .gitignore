@@ -14,10 +14,16 @@ demo/data/
 demo/static/*smoke*.png
 demo/static/debug-page.png
 
+outputs/
+
 .env
 .venv/
 venv/
 env/
+
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
 
 *.log
 *.tmp

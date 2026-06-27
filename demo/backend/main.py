@@ -85,6 +85,10 @@ def local_lan_ip() -> str:
 
 
 def mobile_base_url(request: Request) -> str:
+    configured_base_url = os.getenv("MOBILE_PUBLIC_BASE_URL", "").strip()
+    if configured_base_url:
+        return configured_base_url.rstrip("/")
+
     forwarded_proto = request.headers.get("x-forwarded-proto")
     forwarded_host = request.headers.get("x-forwarded-host")
     if forwarded_host:
