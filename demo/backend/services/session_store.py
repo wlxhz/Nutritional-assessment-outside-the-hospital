@@ -140,6 +140,7 @@ class SessionStore:
             quality="good",
             last_frame_at=datetime.now(CHINA_TZ).isoformat(),
         )
+        await self.broadcast(session_id, "frame_received", {"state": record.state.model_dump(mode="json")})
         foods, quality, guidance = self.analyzer.analyze(decoded, record.state.frame_count, record.state.elapsed_seconds)
         record.state.analyzer = self.analyzer.backend_name
         record.state.model_name = self.analyzer.model_name

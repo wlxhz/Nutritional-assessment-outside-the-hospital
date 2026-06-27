@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from io import BytesIO
+import os
 from pathlib import Path
+import socket
 
 import qrcode
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
@@ -11,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.models.schemas import CaptureEvent, FrameUpload, JoinSessionRequest
 from backend.services.analyzer import FoodAnalyzer
+from backend.services.nutrition import FOOD_PROFILES, all_profiles
 from backend.services.session_store import SessionStore
 
 
@@ -29,6 +32,62 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def local_lan_ip() -> str:
+    """Best-effort LAN IP for phone QR codes.
+
+    If Dashboard is opened through 127.0.0.1, the phone would otherwise scan a
+    loopback address and try to connect to itself. This picks the machine's LAN
+    address so the phone can reach this computer.
+    """
+    configured = os.getenv("MOBILE_HOST")
+    if configured:
+        return configured
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+    except OSError:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for item in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = item[4][0]
+            if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                return ip
+    except OSError:
+        pass
+
+    return "127.0.0.1"
+
+
+def mobile_base_url(request: Request) -> str:
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host")
+    if forwarded_host:
+        scheme = forwarded_proto or request.url.scheme
+        return f"{scheme}://{forwarded_host}"
+
+    host = request.url.hostname or "127.0.0.1"
+    scheme = request.url.scheme
+    port = request.url.port
+
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        scheme = os.getenv("MOBILE_SCHEME", "https")
+        host = local_lan_ip()
+        port = int(os.getenv("MOBILE_PORT", "8443" if scheme == "https" else "8000"))
+    elif scheme == "http" and port == 8000:
+        scheme = os.getenv("MOBILE_SCHEME", "https")
+        port = int(os.getenv("MOBILE_PORT", "8443" if scheme == "https" else "8000"))
+
+    default_port = 443 if scheme == "https" else 80
+    port_part = "" if port in {None, default_port} else f":{port}"
+    return f"{scheme}://{host}{port_part}"
 
 
 def public_base_url(request: Request) -> str:
@@ -55,9 +114,23 @@ async def health() -> dict[str, str]:
     return {"ok": "true", "analyzer": analyzer.backend_name, "model": analyzer.model_name}
 
 
+@app.get("/api/network-info")
+async def network_info(request: Request) -> dict[str, str]:
+    return {
+        "dashboard_base_url": public_base_url(request),
+        "mobile_base_url": mobile_base_url(request),
+        "lan_ip": local_lan_ip(),
+    }
+
+
+@app.get("/api/foods")
+async def foods_database():
+    return {"count": len(FOOD_PROFILES), "foods": all_profiles()}
+
+
 @app.post("/api/sessions")
 async def create_session(request: Request):
-    return store.create_session(public_base_url(request))
+    return store.create_session(mobile_base_url(request))
 
 
 @app.get("/api/sessions/{session_id}/state")

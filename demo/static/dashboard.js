@@ -81,6 +81,9 @@ function render(nextState) {
   if (nextState.latest_frame_url) {
     qs("#latestFrame").src = `${nextState.latest_frame_url}&v=${nextState.frame_count}`;
     qs("#emptyVideo").style.display = "none";
+    if (!nextState.foods.length && nextState.frame_count > 0) {
+      qs("#guidanceBadge").textContent = "已收到手机画面，正在分析当前帧。";
+    }
   }
 
   renderOverlay(nextState);

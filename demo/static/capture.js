@@ -7,7 +7,7 @@ const capture = {
   stream: null,
   timer: null,
   uploading: false,
-  frameIntervalMs: 700,
+  frameIntervalMs: 900,
 };
 
 qs("#mobileSessionId").value = capture.sessionId || "missing";
@@ -110,13 +110,13 @@ async function uploadFrame() {
   capture.uploading = true;
   try {
     const canvas = qs("#captureCanvas");
-    const targetWidth = Math.min(960, video.videoWidth);
+    const targetWidth = Math.min(480, video.videoWidth);
     const targetHeight = Math.round(targetWidth * video.videoHeight / video.videoWidth);
     canvas.width = targetWidth;
     canvas.height = targetHeight;
     const ctx = canvas.getContext("2d");
     ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-    const image = canvas.toDataURL("image/jpeg", 0.72);
+    const image = canvas.toDataURL("image/jpeg", 0.58);
     const payload = {
       token: capture.token,
       image,

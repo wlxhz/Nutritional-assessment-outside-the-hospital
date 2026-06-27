@@ -15,7 +15,7 @@ if __name__ == "__main__":
         "backend.main:app",
         host="0.0.0.0",
         port=8443,
-        reload=True,
+        reload=False,
         ssl_certfile=str(CERT_FILE),
         ssl_keyfile=str(KEY_FILE),
     )

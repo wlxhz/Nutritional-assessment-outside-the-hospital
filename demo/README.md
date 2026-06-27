@@ -10,6 +10,17 @@
 - Dashboard：实时显示手机画面、bbox、mask、多目标 track、克重、误差、置信度、营养汇总、测量质量、报告。
 - 识别算法：优先加载 `models/yolo11n-seg.pt` 走 YOLOv11 segmentation；模型不可用时自动使用 OpenCV/numpy fallback。
 - 营养和估重：按食物密度库计算体积、克重、热量、蛋白质、碳水、脂肪。
+- 非食物拒识：OpenCV fallback 会拒识键盘、屏幕、桌面等明显非食物场景，不再用默认三块区域伪造食物结果。
+- 食材数据库：内置 64 个常见中餐食材/菜品 profile，可通过 `GET /api/foods` 查看。
+
+## 营养数据来源与边界
+
+内置食材库的每 100g 热量、蛋白质、碳水、脂肪等数值，参考公开食物成分资料整理，包括：
+
+- USDA FoodData Central：美国农业部公开营养数据，可下载并提供 API。
+- FAO/INFOODS 收录的 China Food Composition Tables Standard Edition No.6：中国食物成分表条目。
+
+当前 demo 中的数值用于工程估算和产品链路验证，不作为医疗、临床或精密膳食处方数据。
 
 ## 安装依赖
 
@@ -40,40 +51,18 @@ $env:FOOD_MODEL_PATH="F:\泉客松\wo-xi\demo\models\your-food-model.pt"
 python run_http.py
 ```
 
-## 本地电脑测试
-
-```powershell
-cd F:\泉客松\wo-xi\demo
-python run_http.py
-```
-
-打开：
-
-```text
-http://127.0.0.1:8000
-```
-
-## Android 真机摄像头授权测试
-
-Android Chrome 对摄像头通常要求安全上下文。手机访问电脑 IP 的普通 HTTP 地址时，可能不会允许摄像头授权。
-
-先生成开发证书：
+## 本地电脑 + Android 手机测试
 
 ```powershell
 cd F:\泉客松\wo-xi\demo
 python scripts/generate_dev_cert.py
-```
-
-启动 HTTPS：
-
-```powershell
-python run_https.py
+python run_dual.py
 ```
 
 电脑 Dashboard 打开：
 
 ```text
-https://127.0.0.1:8443
+http://127.0.0.1:8000
 ```
 
 手机和电脑连接同一 Wi-Fi，使用脚本输出的局域网地址，例如：
@@ -83,6 +72,8 @@ https://192.168.x.x:8443
 ```
 
 首次访问自签名证书会有浏览器安全提示，需要在测试手机上继续访问或安装信任证书。生产或内网穿透测试建议使用正式 HTTPS 域名。
+
+`run_dual.py` 很重要：它让 HTTP Dashboard 和 HTTPS 手机采集运行在同一个 Python 进程内，共享同一个 session store。不要同时分别启动 `run_http.py` 和 `run_https.py` 做手机扫码测试，否则两个进程的内存会话不共享，手机端会出现 `session not found`。
 
 ## 使用流程
 
