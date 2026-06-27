@@ -17,6 +17,15 @@ const qualityLabels = [
   ["plate_visibility", "主体可见"],
 ];
 
+const scaleStatusLabels = {
+  calibrating: "校准中",
+  stable: "已稳定",
+  too_close: "近距校正",
+  too_far: "远距校正",
+  corrected: "尺度校正",
+  needs_reference: "待标准帧",
+};
+
 qs("#createSessionBtn").addEventListener("click", createSession);
 qs("#finishBtn").addEventListener("click", finishSession);
 qs("#copyUrlBtn").addEventListener("click", copyCaptureUrl);
@@ -142,6 +151,10 @@ function renderFoods(foods) {
       <td>${food.name}<small>${food.category} · ${food.state === "lost" ? "短暂丢失" : "主体跟踪"}</small></td>
       <td>${food.cooking_method_name || "未识别"}<small>${Math.round((food.cooking_confidence || 0) * 100)}%</small></td>
       <td><strong>${food.estimated_weight_g}g</strong><small>±${food.weight_error_g}g</small></td>
+      <td>
+        <span class="scale-badge ${food.scale_corrected ? "corrected" : ""}">${scaleStatusLabels[food.scale_status] || "校准中"}</span>
+        <small>${Math.round((food.scale_confidence || 0) * 100)}% · 原始 ${Math.round(food.raw_weight_g || food.estimated_weight_g)}g</small>
+      </td>
       <td>${food.nutrition.calories_kcal}kcal</td>
       <td>${food.nutrition.protein_g}g</td>
       <td>${food.nutrition.carbs_g}g</td>

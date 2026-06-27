@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import math
 import secrets
+import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -37,6 +38,13 @@ class TrackAggregate:
     last_seen_seconds: float
     visible_frames: int = 1
     missed_frames: int = 0
+    raw_weight_samples: list[float] = field(default_factory=list)
+    accepted_weight_samples: list[float] = field(default_factory=list)
+    accepted_area_ratios: list[float] = field(default_factory=list)
+    accepted_view_qualities: list[float] = field(default_factory=list)
+    reference_weight_g: float | None = None
+    reference_area_ratio: float | None = None
+    scale_correction_events: int = 0
 
 
 class SessionRecord:
@@ -218,12 +226,14 @@ class SessionStore:
                 detection.sample_count = 1
                 detection.stable_seconds = 0
                 detection.convergence = self._convergence(detection.visible_frames, detection.stable_seconds)
-                record.track_memory[best_id] = TrackAggregate(
+                aggregate = TrackAggregate(
                     track_id=best_id,
                     track=detection,
                     first_seen_seconds=elapsed_seconds,
                     last_seen_seconds=elapsed_seconds,
                 )
+                self._prime_scale_memory(aggregate, detection)
+                record.track_memory[best_id] = aggregate
             else:
                 aggregate = record.track_memory[best_id]
                 aggregate.track = self._smooth_track(aggregate.track, detection, aggregate, elapsed_seconds)
@@ -257,15 +267,23 @@ class SessionStore:
         alpha = 0.74 if aggregate.visible_frames >= 4 else 0.62
         stable_seconds = max(0.0, elapsed_seconds - aggregate.first_seen_seconds)
         sample_count = aggregate.visible_frames + 1
-        smoothed_weight = self._ema(previous.estimated_weight_g, detection.estimated_weight_g, alpha)
-        smoothed_volume = self._ema(previous.volume_ml, detection.volume_ml, alpha)
-        smoothed_confidence = min(0.96, self._ema(previous.weight_confidence, detection.weight_confidence, 0.7) + min(0.14, math.log1p(sample_count) * 0.035))
+        scale_result = self._scale_adjusted_measurement(previous, detection, aggregate)
+        smoothed_weight = self._ema(previous.estimated_weight_g, scale_result["weight_g"], scale_result["alpha"])
+        smoothed_volume = self._ema(previous.volume_ml, scale_result["volume_ml"], scale_result["alpha"])
+        smoothed_confidence = min(
+            0.96,
+            self._ema(previous.weight_confidence, detection.weight_confidence, 0.7)
+            + min(0.14, math.log1p(max(scale_result["accepted_count"], sample_count)) * 0.035),
+        )
         base_error = self._ema(previous.weight_error_g, detection.weight_error_g, 0.62)
-        error_floor = max(3.5, smoothed_weight * 0.08)
-        temporal_error = max(error_floor, base_error / math.sqrt(min(sample_count, 18)) + smoothed_weight * 0.035)
+        error_floor = max(3.5, smoothed_weight * (0.075 if scale_result["accepted_count"] >= 4 else 0.11))
+        temporal_error = max(
+            error_floor,
+            base_error / math.sqrt(min(max(scale_result["accepted_count"], 1), 18)) + smoothed_weight * scale_result["error_ratio"],
+        )
         bbox = [round(self._ema(a, b, alpha)) for a, b in zip(previous.bbox, detection.bbox)]
 
-        profile = profile_for_key(detection.profile_key or previous.profile_key)
+        profile = profile_for_key(self._stable_profile_key(previous, detection, scale_result))
         cooking_method = self._stable_cooking_method(previous, detection)
         cooking = cooking_method_for_key(cooking_method)
         updated = detection.model_copy(deep=True)
@@ -276,6 +294,14 @@ class SessionStore:
         updated.cooking_method = cooking_method
         updated.cooking_method_name = cooking.display_name
         updated.cooking_confidence = round(max(previous.cooking_confidence * 0.92, detection.cooking_confidence), 2)
+        updated.raw_weight_g = round(detection.raw_weight_g or detection.estimated_weight_g, 1)
+        updated.area_ratio = round(detection.area_ratio, 4)
+        updated.bbox_area_ratio = round(detection.bbox_area_ratio, 4)
+        updated.scale_view_quality = round(detection.scale_view_quality, 2)
+        updated.scale_corrected = bool(scale_result["corrected"])
+        updated.scale_confidence = round(scale_result["confidence"], 2)
+        updated.scale_sample_count = scale_result["accepted_count"]
+        updated.scale_status = str(scale_result["status"])
         updated.state = "tracking"
         updated.bbox = [int(v) for v in bbox]
         updated.polygon = detection.polygon or previous.polygon
@@ -286,7 +312,7 @@ class SessionStore:
         updated.density_g_per_ml = profile.density_g_per_ml
         updated.estimated_weight_g = round(smoothed_weight, 1)
         updated.weight_error_g = round(temporal_error, 1)
-        updated.weight_confidence = round(smoothed_confidence, 2)
+        updated.weight_confidence = round(max(0.12, min(smoothed_confidence, scale_result["confidence"] * 0.68 + smoothed_confidence * 0.32)), 2)
         updated.visible_frames = sample_count
         updated.sample_count = sample_count
         updated.stable_seconds = round(stable_seconds, 1)
@@ -295,6 +321,147 @@ class SessionStore:
         updated.last_seen_seconds = round(elapsed_seconds, 1)
         updated.nutrition = nutrition_for_weight(profile, updated.estimated_weight_g, cooking_method)
         return updated
+
+    def _prime_scale_memory(self, aggregate: TrackAggregate, detection: FoodTrack) -> None:
+        raw_weight = detection.raw_weight_g or detection.estimated_weight_g
+        aggregate.raw_weight_samples.append(raw_weight)
+        if self._scale_sample_is_usable(aggregate, detection, allow_rebase=True):
+            self._remember_scale_sample(aggregate, detection)
+            detection.scale_sample_count = len(aggregate.accepted_weight_samples)
+            detection.scale_confidence = self._scale_confidence(aggregate, detection)
+            detection.scale_status = "calibrating"
+        else:
+            detection.scale_status = "needs_reference"
+            detection.scale_confidence = 0.12
+
+    def _scale_adjusted_measurement(
+        self,
+        previous: FoodTrack,
+        detection: FoodTrack,
+        aggregate: TrackAggregate,
+    ) -> dict[str, float | int | bool | str]:
+        raw_weight = detection.raw_weight_g or detection.estimated_weight_g
+        detection.raw_weight_g = round(raw_weight, 1)
+        aggregate.raw_weight_samples.append(raw_weight)
+        del aggregate.raw_weight_samples[:-80]
+
+        accepted = self._scale_sample_is_usable(aggregate, detection, allow_rebase=False)
+        if accepted:
+            self._remember_scale_sample(aggregate, detection)
+        else:
+            aggregate.scale_correction_events += 1
+
+        accepted_count = len(aggregate.accepted_weight_samples)
+        reference_weight = aggregate.reference_weight_g
+        reference_area = aggregate.reference_area_ratio
+        has_reference = reference_weight is not None and accepted_count > 0
+        corrected = not accepted and has_reference
+
+        if accepted and reference_weight is not None:
+            target_weight = reference_weight
+            status = "stable" if accepted_count >= 4 else "calibrating"
+            alpha = 0.68 if accepted_count >= 4 else 0.58
+            error_ratio = 0.032 if accepted_count >= 6 else 0.045
+        elif has_reference:
+            target_weight = reference_weight
+            status = self._scale_status_from_geometry(detection, reference_area)
+            alpha = 0.88
+            error_ratio = 0.065
+        else:
+            target_weight = raw_weight
+            status = "needs_reference"
+            alpha = 0.82
+            error_ratio = 0.12
+
+        profile = profile_for_key(detection.profile_key or previous.profile_key)
+        target_volume = target_weight / max(profile.density_g_per_ml, 0.1)
+        confidence = self._scale_confidence(aggregate, detection)
+        if corrected:
+            confidence = max(0.16, confidence - 0.08)
+        if not has_reference:
+            confidence = min(confidence, 0.24)
+
+        return {
+            "weight_g": round(target_weight, 1),
+            "volume_ml": round(target_volume, 1),
+            "alpha": alpha,
+            "confidence": round(confidence, 2),
+            "accepted_count": accepted_count,
+            "corrected": corrected,
+            "status": status,
+            "error_ratio": error_ratio,
+        }
+
+    def _scale_sample_is_usable(self, aggregate: TrackAggregate, detection: FoodTrack, allow_rebase: bool) -> bool:
+        raw_weight = detection.raw_weight_g or detection.estimated_weight_g
+        if raw_weight <= 4:
+            return False
+        area_ratio = detection.area_ratio or self._bbox_area_ratio(detection.bbox)
+        bbox_ratio = detection.bbox_area_ratio or self._bbox_area_ratio(detection.bbox)
+        view_quality = detection.scale_view_quality or 0
+        if bbox_ratio > 0.58 or area_ratio > 0.34:
+            return False
+        if bbox_ratio < 0.018 and area_ratio < 0.009:
+            return False
+        if view_quality < 0.34:
+            return False
+
+        reference_area = aggregate.reference_area_ratio
+        if reference_area is None:
+            return view_quality >= 0.42 and 0.025 <= area_ratio <= 0.21 and bbox_ratio <= 0.42
+
+        ratio = area_ratio / max(reference_area, 0.0001)
+        within_reference = 0.76 <= ratio <= 1.26
+        if within_reference:
+            return True
+
+        previous_quality = aggregate.accepted_view_qualities[-1] if aggregate.accepted_view_qualities else 0
+        better_standard_view = allow_rebase or (view_quality >= max(0.62, previous_quality + 0.16) and bbox_ratio <= 0.34 and area_ratio <= 0.22)
+        return better_standard_view
+
+    def _remember_scale_sample(self, aggregate: TrackAggregate, detection: FoodTrack) -> None:
+        raw_weight = detection.raw_weight_g or detection.estimated_weight_g
+        area_ratio = detection.area_ratio or self._bbox_area_ratio(detection.bbox)
+        aggregate.accepted_weight_samples.append(raw_weight)
+        aggregate.accepted_area_ratios.append(area_ratio)
+        aggregate.accepted_view_qualities.append(detection.scale_view_quality or 0.42)
+        del aggregate.accepted_weight_samples[:-40]
+        del aggregate.accepted_area_ratios[:-40]
+        del aggregate.accepted_view_qualities[:-40]
+        aggregate.reference_weight_g = round(self._trimmed_median(aggregate.accepted_weight_samples), 1)
+        aggregate.reference_area_ratio = round(self._trimmed_median(aggregate.accepted_area_ratios), 5)
+
+    def _scale_confidence(self, aggregate: TrackAggregate, detection: FoodTrack) -> float:
+        accepted_count = len(aggregate.accepted_weight_samples)
+        if accepted_count == 0:
+            return 0.12
+        avg_quality = sum(aggregate.accepted_view_qualities[-12:]) / min(len(aggregate.accepted_view_qualities), 12)
+        current_quality = detection.scale_view_quality or 0
+        sample_score = min(0.46, math.log1p(accepted_count) * 0.14)
+        quality_score = max(avg_quality, current_quality * 0.75) * 0.38
+        stability_penalty = min(0.16, aggregate.scale_correction_events * 0.012)
+        return max(0.18, min(0.92, 0.12 + sample_score + quality_score - stability_penalty))
+
+    @staticmethod
+    def _scale_status_from_geometry(detection: FoodTrack, reference_area: float | None) -> str:
+        area_ratio = detection.area_ratio or 0
+        bbox_ratio = detection.bbox_area_ratio or 0
+        relative_area = area_ratio / max(reference_area or area_ratio or 1, 0.0001)
+        if bbox_ratio > 0.48 or area_ratio > 0.26 or relative_area > 1.26:
+            return "too_close"
+        if reference_area and relative_area < 0.76:
+            return "too_far"
+        return "corrected"
+
+    @staticmethod
+    def _trimmed_median(values: list[float]) -> float:
+        if not values:
+            return 0
+        ordered = sorted(values)
+        if len(ordered) >= 8:
+            trim = max(1, len(ordered) // 6)
+            ordered = ordered[trim:-trim]
+        return float(statistics.median(ordered))
 
     @staticmethod
     def _stable_cooking_method(previous: FoodTrack, detection: FoodTrack) -> str:
@@ -305,17 +472,40 @@ class SessionStore:
         return detection.cooking_method or previous.cooking_method or "unknown"
 
     @staticmethod
+    def _stable_profile_key(previous: FoodTrack, detection: FoodTrack, scale_result: dict[str, float | int | bool | str]) -> str:
+        if previous.profile_key == detection.profile_key:
+            return detection.profile_key
+        if scale_result["corrected"] and previous.sample_count >= 3:
+            return previous.profile_key
+        if previous.convergence >= 0.34 and previous.confidence >= detection.confidence * 0.88:
+            return previous.profile_key
+        return detection.profile_key or previous.profile_key
+
+    @staticmethod
     def _filter_subject_tracks(tracks: list[FoodTrack]) -> list[FoodTrack]:
         if not tracks:
             return []
         active = [track for track in tracks if track.state == "tracking"]
         reference = active or tracks
         max_weight = max(track.estimated_weight_g for track in reference) if reference else 0
+        primary_by_profile: dict[str, FoodTrack] = {}
+        for track in sorted(reference, key=lambda item: item.estimated_weight_g, reverse=True):
+            primary_by_profile.setdefault(track.profile_key, track)
         filtered: list[FoodTrack] = []
         for track in tracks:
             relative_weight = track.estimated_weight_g / max(max_weight, 1)
             stable_enough = track.sample_count >= 3 or track.stable_seconds >= 1.2
             meaningful_size = track.estimated_weight_g >= max(12, max_weight * 0.16)
+            primary = primary_by_profile.get(track.profile_key)
+            likely_same_food_fragment = (
+                primary is not None
+                and primary.track_id != track.track_id
+                and primary.sample_count >= 5
+                and track.estimated_weight_g < primary.estimated_weight_g * 0.36
+                and track.scale_sample_count < 6
+            )
+            if likely_same_food_fragment:
+                continue
             if track.state == "lost" and (track.sample_count < 8 or relative_weight < 0.28):
                 continue
             if not stable_enough and relative_weight < 0.5:
@@ -336,11 +526,13 @@ class SessionStore:
             same_category = current.category == detection.category
             iou = SessionStore._bbox_iou(current.bbox, detection.bbox)
             proximity = SessionStore._center_proximity(current.bbox, detection.bbox)
-            score = iou * 0.62 + proximity * 0.26 + (0.12 if same_profile else 0.05 if same_category else 0)
+            area_ratio = SessionStore._bbox_scale_ratio(current.bbox, detection.bbox)
+            scale_compatible = 0.20 <= area_ratio <= 5.0
+            score = iou * 0.46 + proximity * 0.34 + (0.15 if same_profile else 0.07 if same_category else 0) + (0.05 if scale_compatible else 0)
             if score > best_score:
                 best_id = track_id
                 best_score = score
-        return best_id if best_score >= 0.28 else None
+        return best_id if best_score >= 0.25 else None
 
     @staticmethod
     def _bbox_iou(a: list[int], b: list[int]) -> float:
@@ -352,6 +544,16 @@ class SessionStore:
         intersection = iw * ih
         union = max(1, (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - intersection)
         return intersection / union
+
+    @staticmethod
+    def _bbox_scale_ratio(a: list[int], b: list[int]) -> float:
+        a_area = max(1, (a[2] - a[0]) * (a[3] - a[1]))
+        b_area = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+        return b_area / a_area
+
+    @staticmethod
+    def _bbox_area_ratio(_bbox: list[int]) -> float:
+        return 0.0
 
     @staticmethod
     def _center_proximity(a: list[int], b: list[int]) -> float:
@@ -387,6 +589,13 @@ class SessionStore:
     def _temporal_guidance(foods: list[FoodTrack], fallback: str) -> str:
         avg_convergence = sum(food.convergence for food in foods) / len(foods)
         avg_error_ratio = sum(food.weight_error_g / max(food.estimated_weight_g, 1) for food in foods) / len(foods)
+        scale_corrected = [food for food in foods if food.scale_corrected]
+        if scale_corrected:
+            if any(food.scale_status == "too_close" for food in scale_corrected):
+                return "检测到镜头距离过近，当前克重已使用历史尺度基准校正；请稍微后退并保持主体完整入镜。"
+            if any(food.scale_status == "too_far" for food in scale_corrected):
+                return "检测到主体占画面过小，当前克重已使用历史尺度基准校正；请让食物保持在画面中间并缓慢移动。"
+            return "检测到视角尺度变化，当前克重已使用历史稳定帧校正；继续采集可进一步降低误差。"
         methods = [food.cooking_method_name for food in foods if food.cooking_method not in {"unknown", "raw_light"}]
         method_tip = f"，已识别烹饪方式：{'、'.join(sorted(set(methods)))}" if methods else ""
         if avg_convergence < 0.28:

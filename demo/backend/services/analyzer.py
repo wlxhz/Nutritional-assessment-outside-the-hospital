@@ -594,6 +594,15 @@ class FoodAnalyzer:
         true_area_px = max(1, int(area_px or self._polygon_area(polygon) or bbox_area_px))
         frame_area = max(1, frame_width * frame_height)
         area_ratio = min(0.36, true_area_px / frame_area)
+        bbox_area_ratio = min(1.0, bbox_area_px / frame_area)
+        margin_ratio = min(x1, y1, frame_width - x2, frame_height - y2) / max(min(frame_width, frame_height), 1)
+        center_x = (x1 + x2) / 2 / max(frame_width, 1)
+        center_y = (y1 + y2) / 2 / max(frame_height, 1)
+        centered = max(0.0, 1.0 - math.hypot(center_x - 0.5, center_y - 0.5) * 1.45)
+        not_too_close = max(0.0, 1.0 - max(0.0, bbox_area_ratio - 0.30) / 0.34)
+        not_too_tiny = min(1.0, max(area_ratio, bbox_area_ratio * 0.45) / 0.055)
+        not_clipped = max(0.0, min(1.0, margin_ratio / 0.035))
+        scale_view_quality = round(max(0.05, min(1.0, not_too_close * 0.42 + not_too_tiny * 0.22 + not_clipped * 0.20 + centered * 0.16)), 2)
 
         # Use mask area as the 2D footprint. A square-root compactness term keeps
         # small foods from collapsing to zero while preventing huge bboxes from
@@ -616,6 +625,14 @@ class FoodAnalyzer:
             cooking_method=cooking_method,
             cooking_method_name=cooking.display_name,
             cooking_confidence=round(cooking_confidence, 2),
+            raw_weight_g=estimated_weight,
+            area_ratio=round(area_ratio, 4),
+            bbox_area_ratio=round(bbox_area_ratio, 4),
+            scale_view_quality=scale_view_quality,
+            scale_corrected=False,
+            scale_confidence=round(scale_view_quality * 0.28, 2),
+            scale_sample_count=1,
+            scale_status="calibrating",
             bbox=bbox,
             polygon=polygon,
             mask_svg_path=self._polygon_path(polygon),

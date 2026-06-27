@@ -67,6 +67,14 @@ class FoodTrack(BaseModel):
     cooking_method: str = "unknown"
     cooking_method_name: str = "未识别"
     cooking_confidence: float = 0
+    raw_weight_g: float = 0
+    area_ratio: float = 0
+    bbox_area_ratio: float = 0
+    scale_view_quality: float = 0
+    scale_corrected: bool = False
+    scale_confidence: float = 0
+    scale_sample_count: int = 0
+    scale_status: str = "calibrating"
     state: str = "tracking"
     bbox: list[int]
     polygon: list[list[int]] = Field(default_factory=list)
