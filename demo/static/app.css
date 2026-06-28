@@ -422,6 +422,42 @@ h3 {
   font-weight: 900;
 }
 
+.garden-vision-report {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed rgba(127, 157, 118, 0.45);
+}
+
+.garden-report-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+
+.garden-report-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.garden-report-head strong {
+  color: var(--leaf-strong);
+  font-size: 13px;
+}
+
+.garden-vision-report .vision-report-summary,
+.garden-vision-report .vision-total,
+.garden-vision-report .vision-report-foods {
+  margin-top: 0;
+}
+
+.garden-vision-report .report-food-card {
+  background: rgba(255, 253, 248, 0.82);
+}
+
 .sticker-strip {
   display: flex;
   gap: 10px;

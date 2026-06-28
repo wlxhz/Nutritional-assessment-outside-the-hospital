@@ -177,6 +177,7 @@ function logout() {
   document.querySelectorAll(".tabbar button").forEach((btn) => btn.classList.remove("active"));
   $("screenTitle").textContent = "花园";
   $("visionReportSummary")?.classList.add("hidden");
+  clearGardenVisionReport();
   $("visionSessionPanel")?.classList.add("hidden");
   $("visionRealtimePanel")?.classList.add("hidden");
   $("syncVisionBtn").disabled = true;
@@ -924,15 +925,28 @@ function renderVisionFoods(foods = []) {
   }).join("");
 }
 
-function renderVisionReport(report = {}) {
+function clearGardenVisionReport() {
+  const node = $("gardenVisionReport");
+  if (!node) return;
+  node.classList.add("hidden");
+  node.innerHTML = "";
+}
+
+function visionReportTotals(report = {}, foods = visionFoodsForCurrentReport(report)) {
   const summary = report.meal_summary || {};
+  return {
+    totalWeight: Number(summary.total_weight_g || 0) || foods.reduce((sum, food) => sum + foodGrams(food), 0),
+    totalCalories: Number(summary.total_calories_kcal || 0) || foods.reduce((sum, food) => sum + foodCalories(food), 0),
+  };
+}
+
+function visionReportHtml(report = {}, options = {}) {
   const foods = visionFoodsForCurrentReport(report);
-  const totalWeight = Number(summary.total_weight_g || 0) || foods.reduce((sum, food) => sum + foodGrams(food), 0);
-  const totalCalories = Number(summary.total_calories_kcal || 0) || foods.reduce((sum, food) => sum + foodCalories(food), 0);
-  $("visionReportSummary").classList.remove("hidden");
-  $("visionReportSummary").innerHTML = `
+  const { totalWeight, totalCalories } = visionReportTotals(report, foods);
+  const title = options.title || "本次识别";
+  return `
     <div class="vision-total">
-      <span>本次识别</span>
+      <span>${escapeHtml(title)}</span>
       <strong>${Math.round(totalWeight)}g</strong>
       <span>${Math.round(totalCalories)} kcal</span>
     </div>
@@ -954,6 +968,44 @@ function renderVisionReport(report = {}) {
       }).join("") || "<span>暂无可同步食物</span>"}
     </div>
   `;
+}
+
+function renderGardenReportPreview(report = {}) {
+  const node = $("gardenVisionReport");
+  if (!node) return;
+  node.classList.remove("hidden");
+  node.innerHTML = `
+    <div class="garden-report-head">
+      <span>本次导出报告</span>
+      <strong>已同步展示到花园</strong>
+    </div>
+    ${visionReportHtml(report, { title: "识别报告" })}
+  `;
+}
+
+function renderVisionReport(report = {}) {
+  const foods = visionFoodsForCurrentReport(report);
+  $("visionReportSummary").classList.remove("hidden");
+  $("visionReportSummary").innerHTML = visionReportHtml(report);
+  renderGardenReportPreview(report);
+  if (foods.length) {
+    renderGardenFoodStickers(foods.map((food) => {
+      const level = complianceForFood(food);
+      const stickerColor = stickerStroke[level] || stickerStroke.generally_compliant;
+      return {
+        ...food,
+        itemName: displayFoodName(food),
+        complianceLevel: level,
+        stickerColor,
+        imageSvg: savedCutoutStickerSvg({ ...food, complianceLevel: level, stickerColor }),
+        meta: {
+          grams: foodGrams(food),
+          caloriesKcal: foodCalories(food),
+          confidence: foodConfidence(food),
+        },
+      };
+    }));
+  }
   const redFoods = foods.filter((food) => complianceForFood(food) === "non_compliant");
   if (redFoods.length) showRisk(redFoods);
 }
@@ -986,6 +1038,7 @@ async function createVisionSession() {
   state.vision.latestFrameSrc = "";
   state.vision.latestFrameDataUrl = "";
   $("visionReportSummary").classList.add("hidden");
+  clearGardenVisionReport();
   $("syncVisionBtn").disabled = true;
   const session = await api("/api/sessions", { method: "POST", body: JSON.stringify({}) });
   state.vision.session = session;
@@ -1286,7 +1339,7 @@ function bindEvents() {
   $("createVisionBtn").addEventListener("click", createVisionSession);
   $("finishVisionBtn").addEventListener("click", finishVisionSession);
   $("syncVisionBtn").addEventListener("click", syncVisionIntake);
-  $("visionContractBtn").addEventListener("click", loadVisionContract);
+  $("visionContractBtn")?.addEventListener("click", loadVisionContract);
   $("riskCloseBtn").addEventListener("click", closeRisk);
   $("riskContinueBtn").addEventListener("click", closeRisk);
   $("smsBtn").addEventListener("click", openSmsFlow);
