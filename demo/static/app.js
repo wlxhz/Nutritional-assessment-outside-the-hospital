@@ -197,10 +197,14 @@ function logout() {
 }
 
 function renderDevState(config = {}) {
+  const aiMissing = config.ai?.missingFields || [];
+  const aiText = config.aiConfigured
+    ? `${config.ai?.defaultModel || "已配置"} 已接入`
+    : `未配置，缺少 ${aiMissing.length ? aiMissing.join(" / ") : "模型参数"}`;
   $("devState").innerHTML = `
     <dt>运行方式</dt><dd>${config.runtime === "production" ? "服务器部署" : "本地调试"}</dd>
     <dt>数据存储</dt><dd>${config.storage || "sqlite"}</dd>
-    <dt>AI 模型</dt><dd>${config.aiConfigured ? `${config.ai?.defaultModel || "已配置"} 已接入` : "未配置，使用本地规则"}</dd>
+    <dt>AI 模型</dt><dd>${aiText}</dd>
     <dt>环境文件</dt><dd>${(config.loadedEnvFiles || []).length ? "已加载" : "未加载"}</dd>
     <dt>视觉接口</dt><dd>${config.vision?.status === "integrated" ? "已接入" : (config.vision?.status || "待检查")}</dd>
   `;
@@ -987,7 +991,8 @@ async function createVisionSession() {
   state.vision.session = session;
   $("visionSessionPanel").classList.remove("hidden");
   $("visionQr").src = session.qr_code_url;
-  $("captureLink").href = `/capture?session_id=${encodeURIComponent(session.session_id)}&token=${encodeURIComponent(session.token)}`;
+  $("captureLink").href = session.capture_url || `/capture?session_id=${encodeURIComponent(session.session_id)}&token=${encodeURIComponent(session.token)}`;
+  $("captureUrlText").textContent = session.capture_url || "";
   $("finishVisionBtn").disabled = false;
   setVisionStatus("等待手机", "waiting_mobile");
   renderVisionFoods([]);
@@ -1003,8 +1008,10 @@ async function refreshVisionSessionState() {
     renderVisionState(data);
     if (data.status === "completed" || data.status === "error") stopVisionPolling();
   } catch (error) {
-    setVisionStatus("连接异常", "error");
-    $("visionGuidance").textContent = error.message;
+    stopVisionPolling();
+    setVisionStatus("会话失效", "error");
+    $("visionGuidance").textContent = "当前二维码会话已失效或服务刚重启，请点击“创建识别会话”重新生成二维码。";
+    $("visionMeta").textContent = error.message || "session not found";
   }
 }
 
@@ -1138,8 +1145,17 @@ async function refreshReport() {
   if (!state.user) return;
   const data = await api(`/api/mmy/reports/nutrients?userId=${encodeURIComponent(userId())}&rangeType=${state.rangeType}`);
   state.report = data.report;
-  renderPie(data.data.pieChartData || []);
-  renderBars(data.data.barChartData || []);
+  renderReportMeta(data.data || {});
+  renderPie(data.data?.pieChartData || []);
+  renderBars(data.data?.barChartData || []);
+}
+
+function renderReportMeta(data = {}) {
+  const rangeNames = { day: "日", week: "周", month: "月" };
+  const rangeName = rangeNames[data.rangeType] || "日";
+  const recordCount = Number(data.recordCount || 0);
+  const label = data.rangeLabel ? `${rangeName}统计 ${data.rangeLabel}` : `${rangeName}统计`;
+  $("reportRangeLabel").textContent = `${label} · ${recordCount} 条记录`;
 }
 
 function renderPie(items) {
@@ -1152,19 +1168,35 @@ function renderPie(items) {
   if (!normalized.length || (!totalValue && !totalPercent)) {
     $("pieChart").style.background = "#eadfce";
     $("pieChart").dataset.summary = "暂无记录";
+    $("pieLegend").innerHTML = `<span class="empty-vision">暂无摄入构成数据</span>`;
     return;
   }
   let cursor = 0;
-  const stops = normalized.map((item, index) => {
+  const chartItems = normalized.map((item, index) => {
     const start = cursor;
     const percent = totalValue > 0 ? (Math.max(0, item.value) / totalValue) * 100 : (Math.max(0, item.percent) / totalPercent) * 100;
     cursor += percent;
-    return `${colors[index % colors.length]} ${start}% ${cursor}%`;
+    return {
+      ...item,
+      color: colors[index % colors.length],
+      displayPercent: percent,
+      start,
+      end: cursor,
+    };
   });
+  const stops = chartItems.map((item) => `${item.color} ${item.start}% ${item.end}%`);
   $("pieChart").style.background = `conic-gradient(${stops.join(", ")})`;
-  $("pieChart").dataset.summary = normalized
+  $("pieChart").dataset.summary = chartItems
     .map((item) => `${item.label}${Math.round(totalValue > 0 ? item.value : item.percent)}${totalValue > 0 ? (item.unit || "g") : "%"}`)
     .join(" / ");
+  $("pieLegend").innerHTML = chartItems.map((item) => `
+    <div class="pie-legend-item">
+      <i style="background:${item.color}"></i>
+      <span>${escapeHtml(item.label)}</span>
+      <strong>${Math.round(item.value)}${escapeHtml(item.unit || "g")}</strong>
+      <em>${Math.round(item.displayPercent)}%</em>
+    </div>
+  `).join("");
 }
 
 function renderBars(items) {
@@ -1172,16 +1204,30 @@ function renderBars(items) {
     const actual = Number(item.actualValue || 0);
     const target = Math.max(1, Number(item.targetValue || 1));
     const rawPct = Math.round((actual / target) * 100);
-    const pct = Math.min(100, Math.max(0, rawPct));
-    const over = rawPct > 100;
+    const displayPct = Math.max(0, rawPct);
+    const pct = Math.min(100, displayPct);
+    const over = displayPct > 100;
+    const low = displayPct < 80;
+    const status = over ? `超标 ${displayPct - 100}%` : low ? `不足 ${100 - displayPct}%` : `达成 ${displayPct}%`;
+    const actualText = `${formatChartNumber(actual)}${item.unit || ""}`;
+    const targetText = `${formatChartNumber(target)}${item.unit || ""}`;
     return `
       <div class="bar-row ${over ? "over-target" : ""}">
-        <span>${item.label}</span>
-        <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
-        <span>${rawPct}%</span>
+        <div class="bar-label">
+          <span>${escapeHtml(item.label)}</span>
+          <small>${actualText} / ${targetText}</small>
+        </div>
+        <div class="bar-track" aria-label="${escapeHtml(item.label)} ${displayPct}%">
+          <div class="bar-fill" style="width:${pct}%"></div>
+        </div>
+        <span class="bar-status">${status}</span>
       </div>
     `;
   }).join("");
+}
+
+function formatChartNumber(value) {
+  return Number(value || 0).toLocaleString("zh-CN", { maximumFractionDigits: 1 });
 }
 
 async function refreshAgentPrompts() {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from io import BytesIO
 import os
 from pathlib import Path
@@ -28,9 +28,10 @@ STATIC_DIR = BASE_DIR / "static"
 PROJECT_DIR = BASE_DIR.parent
 REPO_DIR = PROJECT_DIR.parent
 ENV_SOURCES = [
+    Path("/opt/manmanyang/.env"),
     REPO_DIR / ".env",
-    REPO_DIR / ".env.example",
     PROJECT_DIR / ".env",
+    REPO_DIR / ".env.example",
     PROJECT_DIR / ".env.example",
 ]
 LOADED_ENV_FILES = [str(path) for path in ENV_SOURCES if load_env_file(path)]
@@ -352,10 +353,57 @@ def _stickers_from_vision_items(items: list[dict[str, Any]]) -> list[dict[str, A
     return stickers
 
 
-def _report_data(range_type: str, intakes: list[dict[str, Any]]) -> dict[str, Any]:
+def _parse_record_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=CHINA_TZ)
+    return parsed.astimezone(CHINA_TZ)
+
+
+def _report_range(range_type: str) -> tuple[str, datetime, datetime, int, int, str]:
+    normalized = range_type if range_type in {"day", "week", "month"} else "day"
+    now = datetime.now(CHINA_TZ)
+    today = now.date()
+    if normalized == "week":
+        start_date = today - timedelta(days=today.weekday())
+        end_date = start_date + timedelta(days=7)
+        label = f"{start_date.strftime('%m.%d')}-{(end_date - timedelta(days=1)).strftime('%m.%d')}"
+    elif normalized == "month":
+        start_date = today.replace(day=1)
+        next_month = today.replace(year=today.year + 1, month=1, day=1) if today.month == 12 else today.replace(month=today.month + 1, day=1)
+        end_date = next_month
+        label = f"{start_date.strftime('%Y.%m')}"
+    else:
+        start_date = today
+        end_date = today + timedelta(days=1)
+        label = today.strftime("%m.%d")
+    start = datetime.combine(start_date, time.min, tzinfo=CHINA_TZ)
+    end = datetime.combine(end_date, time.min, tzinfo=CHINA_TZ)
+    days = max(1, (end_date - start_date).days)
+    target_days = min(days, max(1, (today - start_date).days + 1))
+    return normalized, start, end, days, target_days, label
+
+
+def _filter_intakes_for_range(intakes: list[dict[str, Any]], start: datetime, end: datetime) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for record in intakes:
+        created_at = _parse_record_datetime(record.get("createdAt"))
+        if created_at and start <= created_at < end:
+            filtered.append(record)
+    return filtered
+
+
+def _report_data(range_type: str, intakes: list[dict[str, Any]], plan: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized_range, start, end, day_count, target_day_count, range_label = _report_range(range_type)
+    range_intakes = _filter_intakes_for_range(intakes, start, end)
     totals = _sum_nutrients([
         {"nutrients": record.get("nutrientActual", {})}
-        for record in intakes
+        for record in range_intakes
     ])
     pie_keys = ["proteinG", "fatG", "carbohydrateG", "dietaryFiber"]
     pie_total = sum(max(totals.get(key, 0), 0) for key in pie_keys) or 1
@@ -366,6 +414,18 @@ def _report_data(range_type: str, intakes: list[dict[str, Any]]) -> dict[str, An
         "carbohydrateG": ("碳水", "g", 210),
         "dietaryFiber": ("膳食纤维", "g", 25),
     }
+    daily_goal = ((plan or {}).get("plan") or {}).get("dailyGoal") or {}
+    nutrient_targets = ((plan or {}).get("plan") or {}).get("nutrientTargets") or {}
+
+    def target_for(key: str) -> float:
+        fallback = float(labels[key][2])
+        raw = daily_goal.get(key, nutrient_targets.get(key, fallback))
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = fallback
+        return max(0.1, value)
+
     pie = [
         {
             "label": labels[key][0],
@@ -378,17 +438,24 @@ def _report_data(range_type: str, intakes: list[dict[str, Any]]) -> dict[str, An
     bar = [
         {
             "label": labels[key][0],
-            "targetValue": labels[key][2],
+            "targetValue": target_for(key) * target_day_count,
             "actualValue": totals.get(key, 0),
             "unit": labels[key][1],
         }
         for key in pie_keys
     ]
     return {
-        "rangeType": range_type,
+        "rangeType": normalized_range,
+        "rangeLabel": range_label,
+        "rangeStart": start.isoformat(),
+        "rangeEnd": end.isoformat(),
+        "dayCount": day_count,
+        "targetDayCount": target_day_count,
+        "recordCount": len(range_intakes),
         "nutrientSummary": totals,
         "pieChartData": pie,
         "barChartData": bar,
+        "targetSource": (plan or {}).get("sourceType") or "default",
         "source": "local_sqlite",
     }
 
@@ -417,7 +484,7 @@ async def health() -> dict[str, str]:
 async def mmy_config() -> dict[str, Any]:
     return {
         "app": "慢慢养",
-        "runtime": "local",
+        "runtime": os.getenv("APP_ENV", "local"),
         "storage": "sqlite",
         "aiConfigured": mmy_ai.config.configured,
         "ai": mmy_ai.config.public_status(),
@@ -665,7 +732,7 @@ async def mmy_vision_intake_sync(payload: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/mmy/reports/nutrients")
 async def mmy_reports(userId: str, rangeType: str = "day") -> dict[str, Any]:
     intakes = mmy_store.list_intakes(userId)
-    data = _report_data(rangeType, intakes)
+    data = _report_data(rangeType, intakes, mmy_store.latest_plan(userId))
     report = mmy_store.save_report(userId, rangeType, data)
     return {"ok": True, "report": report, "data": data}
 

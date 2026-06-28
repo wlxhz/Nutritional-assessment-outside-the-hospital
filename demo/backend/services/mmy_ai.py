@@ -47,6 +47,17 @@ class AiConfig:
     def configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.default_model)
 
+    @property
+    def missing_fields(self) -> list[str]:
+        missing: list[str] = []
+        if not self.base_url:
+            missing.append("AI_BASE_URL")
+        if not self.api_key:
+            missing.append("AI_API_KEY")
+        if not self.default_model:
+            missing.append("AI_DEFAULT_MODEL")
+        return missing
+
     def public_status(self) -> dict[str, Any]:
         return {
             "configured": self.configured,
@@ -56,6 +67,7 @@ class AiConfig:
             "agentModel": self.agent_model or self.default_model,
             "hasApiKey": bool(self.api_key),
             "apiKeyPreview": f"{self.api_key[:6]}...{self.api_key[-4:]}" if self.api_key else "",
+            "missingFields": self.missing_fields,
             "timeoutMs": self.timeout_ms,
         }
 

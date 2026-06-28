@@ -186,6 +186,7 @@
               <div class="vision-copy">
                 <strong id="visionGuidance">请创建识别会话。</strong>
                 <span id="visionMeta">用手机或另一台电脑打开采集页，授权摄像头后连续采集 5-10 秒。</span>
+                <code id="captureUrlText" class="capture-url-text"></code>
                 <a id="captureLink" href="#" target="_blank" rel="noreferrer">打开采集页</a>
               </div>
             </div>
@@ -246,7 +247,11 @@
           <div class="chart-grid">
             <div class="soft-panel">
               <h3>占比</h3>
-              <div id="pieChart" class="pie-chart"></div>
+              <p id="reportRangeLabel" class="chart-subtitle">今日记录</p>
+              <div class="pie-wrap">
+                <div id="pieChart" class="pie-chart"></div>
+                <div id="pieLegend" class="pie-legend"></div>
+              </div>
             </div>
             <div class="soft-panel">
               <h3>对比</h3>
